@@ -4,6 +4,9 @@ from pathlib import Path
 import base64
 import time
 from difflib import SequenceMatcher
+import os
+import hashlib
+import hmac
 
 import pandas as pd
 import plotly.express as px
@@ -6570,9 +6573,89 @@ def render_api_settings_tab() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _read_secret_or_env(key: str) -> str:
+    value = ""
+    try:
+        value = str(st.secrets.get(key, "") or "").strip()
+    except Exception:
+        value = ""
+    if value:
+        return value
+    return str(os.getenv(key, "") or "").strip()
+
+
+def _get_access_password_config() -> tuple[str, str]:
+    # Preferred: sha256 hash. Fallback: plain password.
+    raw_hash = _read_secret_or_env("APP_PASSWORD_HASH")
+    if raw_hash:
+        h = raw_hash.strip().lower()
+        if h.startswith("sha256:"):
+            h = h.split(":", 1)[1].strip()
+        if re.fullmatch(r"[0-9a-f]{64}", h):
+            return "hash", h
+
+    raw_plain = _read_secret_or_env("APP_PASSWORD")
+    if raw_plain:
+        return "plain", raw_plain
+    return "", ""
+
+
+def _verify_access_password(input_password: str) -> bool:
+    mode, stored = _get_access_password_config()
+    if not mode:
+        return False
+    candidate = str(input_password or "")
+    if mode == "hash":
+        digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(digest, stored)
+    return hmac.compare_digest(candidate, stored)
+
+
+def require_password_gate() -> None:
+    mode, _ = _get_access_password_config()
+    if not mode:
+        st.error("접속 비밀번호가 설정되지 않았습니다. Secrets 또는 환경변수 설정 후 다시 실행해 주세요.")
+        st.markdown("다음 중 하나를 설정하세요.")
+        st.code(
+            "APP_PASSWORD = \"원하는비밀번호\"\n"
+            "# 또는\n"
+            "APP_PASSWORD_HASH = \"sha256:64자리해시\"",
+            language="toml",
+        )
+        st.stop()
+
+    if st.session_state.get("auth_ok", False):
+        return
+
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>접속 비밀번호 확인</h1>
+            <p>이 앱은 비밀번호 인증 후에만 사용할 수 있습니다.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.form("access_password_form", clear_on_submit=True):
+        input_password = st.text_input("비밀번호", type="password", placeholder="접속 비밀번호 입력")
+        submitted = st.form_submit_button("로그인", type="primary")
+    if submitted:
+        if _verify_access_password(input_password):
+            st.session_state["auth_ok"] = True
+            st.session_state.pop("auth_error", None)
+            st.rerun()
+        st.session_state["auth_error"] = "비밀번호가 올바르지 않습니다."
+
+    auth_err = str(st.session_state.get("auth_error", "") or "").strip()
+    if auth_err:
+        st.error(auth_err)
+    st.stop()
+
+
 def main() -> None:
     st.set_page_config(page_title="투자 포트폴리오 기록장", page_icon=":chart_with_upwards_trend:", layout="wide")
     inject_styles()
+    require_password_gate()
     force_reload = bool(st.session_state.pop("force_reload_api_settings", False))
     initialize_api_settings(force=force_reload)
 
@@ -6587,6 +6670,9 @@ def main() -> None:
     )
 
     with st.sidebar:
+        if st.button("로그아웃", key="sidebar_logout_btn"):
+            st.session_state["auth_ok"] = False
+            st.rerun()
         st.subheader("기록 설정")
         selected_date = st.date_input("기록 날짜", value=DEFAULT_DATE)
         usd_krw_rate, fx_source = get_usd_krw_rate_for_date(selected_date)

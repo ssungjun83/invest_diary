@@ -26,6 +26,9 @@ python -m streamlit run app.py
   - `portfolio.db`, `*.db`, `*.sqlite*`
   - `.env*`, `.streamlit/secrets.toml`
   - personal workbook `내 주식자산.xlsx`
+- App access is protected by password gate. Set one of:
+  - `APP_PASSWORD = "your_password"`
+  - `APP_PASSWORD_HASH = "sha256:<64-hex>"`
 
 ## Streamlit Community Cloud deployment
 
@@ -36,3 +39,4 @@ python -m streamlit run app.py
 5. Click `Deploy`
 
 If you need API keys in deployed environment, configure them in Streamlit Cloud `Secrets`.
+Also set app password in `Secrets` using `APP_PASSWORD` or `APP_PASSWORD_HASH`.
