@@ -1,56 +1,38 @@
-﻿# 투자 포트폴리오 기록장 (Streamlit)
+# Invest Diary (Streamlit)
 
-## 실행 방법
+Personal investment portfolio tracker built with Streamlit.
+
+## Run locally
+
 ```bash
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-## 기본 기능
-- 탭 구성: `대시보드` / `기록 입력` / `환율` / `기업정보` / `기업분석` / `기업 점수` / `API 설정`
-- 대시보드에서 전체 자산 요약(총 평가금액/총 손익/총 수익률/비중 최대 종목) 한눈에 확인
-- 시기별 자산 흐름 조회: `1개월`, `3개월`, `6개월`, `YTD`, `1년`, `전체`
-- 그래프 시각화 강화:
-  - 자산 비중 파이/트리맵, 종목별 평가금액 막대, 수익률-비중 버블맵
-  - 총자산/원금 면적 차트, 총손익 막대, 총수익률 라인
-  - 자산 증감 차트, 드로우다운 차트, 월간 수익률 히트맵
-- 종목/수량/평가금액/손익/수익률 표 입력 및 날짜별 스냅샷 저장 (로컬 `portfolio.db`)
-- USD 자산은 기록 날짜 기준 환율을 자동 조회해 원화로 변환 후 총자산에 반영
-- 기업정보 탭:
-  - 보유기업 + 사용자 추가기업 리스트 통합 관리(추가/삭제) 및 선택
-  - 기업 리스트 저장 티커 우선 적용 + 자동 티커 입력
-  - AI API 기반 자동 생성(OpenAI/Claude 선택): 기업개요, 핵심 제품/서비스, 원재료, 이익 증가/감소 요인
-  - 재무지표/연간 손익·재무상태표·현금흐름표 요약 자동 불러오기 및 저장 (yfinance 우선, Alpha Vantage/Finnhub 보조)
-  - 분석 이력 저장/조회 관리
-- 기업분석 탭:
-  - 비교할 기업과 지표(PER/PBR/ROE/배당수익률 등) 직접 선택
-  - 선택 지표 기준 점수 계산 후 종합 점수 높은 순 자동 정렬
-  - 지표 가중치 직접 설정(선택) 및 기업 랭킹/지표 비교 그래프 제공
-- 환율 탭:
-  - 주요 통화쌍(USD/KRW, EUR/KRW 등) 최신 환율 및 변동률 요약
-  - 기간별 환율 추이/비교 그래프와 변동률 비교 차트
-- 기업 점수 시스템:
-  - 배당수익률/성장성/안정성/PER/PBR/ROE 기반 종합 점수 산출
-  - 기업명 기반 티커 자동 입력(보유 종목/저장 이력/검색 기반)
-  - OpenAI/Claude 선택 + API 키 입력 시(선택) 티커 추론 보조 사용 가능
-  - `yfinance` 자동 지표 불러오기(티커 기반, 가능 범위 내)
-  - 기업 점수 히스토리 저장/시계열 추적/랭킹 시각화
-- API 설정 탭:
-  - OpenAI/Claude API 키와 기본 모델/기본 제공자 입력 및 저장
-  - 선택: Alpha Vantage/Finnhub API 키 입력 시 기업 데이터 멀티소스 수집 보조
-  - 저장 시 전체 탭(기업정보/기업분석/기업 점수)에 공통 반영
+## Main tabs
 
-## 참고
-- 처음 실행 시 화면 왼쪽의 `샘플 데이터로 시작` 버튼을 누르면 제공해주신 종목 리스트가 채워집니다.
-- 같은 날짜에 다시 저장하면 해당 날짜 데이터는 최신 입력으로 덮어씁니다.
-- API 키는 로컬 `portfolio.db`에 저장되며, `.gitignore`에 `portfolio.db`/`.env`/`secrets.toml`을 제외하도록 설정되어 GitHub 업로드에서 빠집니다.
+- Dashboard
+- Record Input
+- FX
+- Company Info
+- Company Comparison
+- Company Score
+- API Settings
 
-## Streamlit 배포 (Community Cloud)
-1. GitHub 저장소에 현재 프로젝트를 push
-2. Streamlit Cloud에서 `New app` 선택
-3. Repository: `ssungjun83/invest_diary`, Branch: `main`, Main file path: `app.py`
-4. Deploy 클릭
+## Security
 
-주의:
-- API 키는 앱 내 `API 설정` 탭에서 입력하면 로컬 DB에만 저장됩니다.
-- 배포 환경에서 API 키를 영구 사용하려면 Streamlit Cloud의 `Secrets` 기능을 사용하세요.
+- API keys are saved in local `portfolio.db` (not committed).
+- `.gitignore` excludes:
+  - `portfolio.db`, `*.db`, `*.sqlite*`
+  - `.env*`, `.streamlit/secrets.toml`
+  - personal workbook `내 주식자산.xlsx`
+
+## Streamlit Community Cloud deployment
+
+1. Open Streamlit Community Cloud and click `New app`.
+2. Repository: `ssungjun83/invest_diary`
+3. Branch: `main`
+4. Main file path: `app.py`
+5. Click `Deploy`
+
+If you need API keys in deployed environment, configure them in Streamlit Cloud `Secrets`.
