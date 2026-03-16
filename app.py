@@ -13,6 +13,13 @@ import re
 import requests
 import streamlit as st
 
+try:
+    import matplotlib  # noqa: F401
+
+    HAS_MATPLOTLIB = True
+except Exception:
+    HAS_MATPLOTLIB = False
+
 DB_PATH = Path("portfolio.db")
 DEFAULT_DATE = date.today()
 
@@ -3540,7 +3547,7 @@ def style_market_detail_table(df: pd.DataFrame):
 
         styler = styler.apply(_market_row_band, axis=1)
 
-    if "비중(%)" in view.columns:
+    if "비중(%)" in view.columns and HAS_MATPLOTLIB:
         styler = styler.background_gradient(subset=["비중(%)"], cmap="Blues")
 
     try:
@@ -3572,12 +3579,13 @@ def style_market_summary_table(df: pd.DataFrame):
 
     if "손익금액" in view.columns:
         styler = styler.applymap(_signed_color_style, subset=["손익금액"])
-        styler = styler.background_gradient(
-            subset=["손익금액"],
-            cmap=["#dbeafe", "#eef2f7", "#ffd9dc"],
-        )
+        if HAS_MATPLOTLIB:
+            styler = styler.background_gradient(
+                subset=["손익금액"],
+                cmap=["#dbeafe", "#eef2f7", "#ffd9dc"],
+            )
 
-    if "비중(%)" in view.columns:
+    if "비중(%)" in view.columns and HAS_MATPLOTLIB:
         styler = styler.background_gradient(subset=["비중(%)"], cmap="Blues")
 
     if "시장구분" in view.columns:
