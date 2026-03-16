@@ -25,6 +25,7 @@ except Exception:
 
 DB_PATH = Path("portfolio.db")
 DEFAULT_DATE = date.today()
+DEFAULT_EXCEL_PATH = Path("내 주식자산.xlsx")
 
 COL_NAME = "종목명"
 COL_QTY = "보유수량"
@@ -857,29 +858,163 @@ def save_snapshot(snapshot_date: date, df: pd.DataFrame) -> None:
         conn.close()
 
 
+def empty_portfolio_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=COLUMNS)
+
+
+def _pick_excel_column(raw_df: pd.DataFrame, aliases: list[str]) -> str:
+    if raw_df is None or raw_df.empty:
+        return ""
+    norm_map = {}
+    for col in raw_df.columns:
+        key = re.sub(r"[\s_()\-]+", "", str(col or "").strip().lower())
+        norm_map[key] = str(col)
+    for alias in aliases:
+        alias_key = re.sub(r"[\s_()\-]+", "", alias.strip().lower())
+        if alias_key in norm_map:
+            return norm_map[alias_key]
+    return ""
+
+
+def _to_num_series(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.replace(",", "", regex=False).str.replace("%", "", regex=False).str.strip()
+    s = s.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA, "none": pd.NA})
+    return pd.to_numeric(s, errors="coerce")
+
+
+def resolve_excel_path() -> Path | None:
+    env_path = str(os.getenv("PORTFOLIO_EXCEL_PATH", "") or "").strip()
+    if env_path:
+        p = Path(env_path)
+        if p.exists() and p.is_file():
+            return p
+    if DEFAULT_EXCEL_PATH.exists() and DEFAULT_EXCEL_PATH.is_file():
+        return DEFAULT_EXCEL_PATH
+    return None
+
+
+def load_portfolio_from_excel() -> pd.DataFrame:
+    excel_path = resolve_excel_path()
+    if excel_path is None:
+        return empty_portfolio_df()
+
+    try:
+        xls = pd.ExcelFile(excel_path)
+    except Exception:
+        return empty_portfolio_df()
+
+    preferred = ["보유현황", "포트폴리오", "portfolio", "sheet1", "Sheet1"]
+    ordered_sheets = [s for s in preferred if s in xls.sheet_names] + [s for s in xls.sheet_names if s not in preferred]
+
+    for sheet_name in ordered_sheets:
+        try:
+            raw = pd.read_excel(xls, sheet_name=sheet_name)
+        except Exception:
+            continue
+        if raw is None or raw.empty:
+            continue
+
+        name_col = _pick_excel_column(raw, ["종목명", "기업명", "name", "stockname", "stock"])
+        qty_col = _pick_excel_column(raw, ["보유수량", "수량", "qty", "quantity", "보유주수", "주수"])
+        value_col = _pick_excel_column(raw, ["평가금액", "평가액", "marketvalue", "value", "평가"])
+        pnl_col = _pick_excel_column(raw, ["손익금액", "손익", "pnl", "profitloss"])
+        ret_col = _pick_excel_column(raw, ["수익률%", "수익률", "pnl%", "return%", "return"])
+        currency_col = _pick_excel_column(raw, ["통화", "currency", "cur"])
+        fx_col = _pick_excel_column(raw, ["환율원화기준", "환율", "fxrate", "fx"])
+
+        if not name_col or not qty_col or not value_col:
+            continue
+
+        view = pd.DataFrame()
+        view[COL_NAME] = raw[name_col].astype(str).str.strip()
+        view[COL_QTY] = _to_num_series(raw[qty_col])
+        view[COL_VALUE] = _to_num_series(raw[value_col])
+        view[COL_PNL] = _to_num_series(raw[pnl_col]) if pnl_col else pd.Series([pd.NA] * len(raw))
+        view[COL_RETURN] = _to_num_series(raw[ret_col]) if ret_col else pd.Series([pd.NA] * len(raw))
+        view[COL_CURRENCY] = raw[currency_col].astype(str).str.strip().str.upper() if currency_col else "KRW"
+        view[COL_FX_RATE] = _to_num_series(raw[fx_col]) if fx_col else pd.Series([pd.NA] * len(raw))
+
+        view = view[view[COL_NAME] != ""].copy()
+        view = view.dropna(subset=[COL_NAME, COL_QTY, COL_VALUE], how="any")
+        if view.empty:
+            continue
+
+        # Fill missing PnL/Return from each other when possible.
+        if view[COL_PNL].isna().any() and view[COL_RETURN].notna().any():
+            principal = view[COL_VALUE] / (1 + (view[COL_RETURN] / 100.0))
+            calc_pnl = view[COL_VALUE] - principal
+            view.loc[view[COL_PNL].isna(), COL_PNL] = calc_pnl[view[COL_PNL].isna()]
+        if view[COL_RETURN].isna().any() and view[COL_PNL].notna().any():
+            principal = view[COL_VALUE] - view[COL_PNL]
+            calc_ret = (view[COL_PNL] / principal.replace(0, pd.NA)) * 100.0
+            view.loc[view[COL_RETURN].isna(), COL_RETURN] = calc_ret[view[COL_RETURN].isna()]
+
+        view[COL_PNL] = pd.to_numeric(view[COL_PNL], errors="coerce").fillna(0.0)
+        view[COL_RETURN] = pd.to_numeric(view[COL_RETURN], errors="coerce").fillna(0.0)
+        view[COL_CURRENCY] = view[COL_CURRENCY].replace({"": "KRW", "NAN": "KRW", "NONE": "KRW"}).fillna("KRW")
+        view[COL_FX_RATE] = pd.to_numeric(view[COL_FX_RATE], errors="coerce")
+        view.loc[view[COL_CURRENCY] == "KRW", COL_FX_RATE] = 1.0
+        view[COL_FX_RATE] = view[COL_FX_RATE].fillna(1.0)
+
+        return view[COLUMNS]
+
+    return empty_portfolio_df()
+
+
+def _query_snapshot_for_date(conn: sqlite3.Connection, snapshot_date: date | str) -> pd.DataFrame:
+    date_str = snapshot_date if isinstance(snapshot_date, str) else snapshot_date.isoformat()
+    query = """
+        SELECT
+            stock_name AS 종목명,
+            quantity AS 보유수량,
+            COALESCE(currency, 'KRW') AS 통화,
+            COALESCE(fx_rate, 1) AS "환율(원화기준)",
+            market_value AS 평가금액,
+            pnl_value AS 손익금액,
+            pnl_pct AS "수익률(%)"
+        FROM snapshots
+        WHERE snapshot_date = ?
+        ORDER BY market_value DESC
+    """
+    return pd.read_sql_query(query, conn, params=(date_str,))
+
+
 def load_snapshot(snapshot_date: date) -> pd.DataFrame:
     conn = get_conn()
     try:
-        query = """
-            SELECT
-                stock_name AS 종목명,
-                quantity AS 보유수량,
-                COALESCE(currency, 'KRW') AS 통화,
-                COALESCE(fx_rate, 1) AS "환율(원화기준)",
-                market_value AS 평가금액,
-                pnl_value AS 손익금액,
-                pnl_pct AS "수익률(%)"
-            FROM snapshots
-            WHERE snapshot_date = ?
-            ORDER BY market_value DESC
-        """
-        df = pd.read_sql_query(query, conn, params=(snapshot_date.isoformat(),))
+        df = _query_snapshot_for_date(conn, snapshot_date)
+        if df.empty:
+            latest_row = conn.execute(
+                "SELECT MAX(snapshot_date) FROM snapshots WHERE snapshot_date <= ?",
+                (snapshot_date.isoformat(),),
+            ).fetchone()
+            latest_date = str(latest_row[0] or "").strip() if latest_row else ""
     finally:
         conn.close()
 
-    if df.empty:
-        return pd.DataFrame(DEFAULT_HOLDINGS)
-    return df
+    if not df.empty:
+        return df
+
+    # 오늘/미래 조회에서는 DB 저장이 없어도 엑셀 최신 입력값을 우선 반영한다.
+    if snapshot_date >= date.today():
+        excel_df = load_portfolio_from_excel()
+        if not excel_df.empty:
+            return excel_df
+
+    if latest_date:
+        conn = get_conn()
+        try:
+            df = _query_snapshot_for_date(conn, latest_date)
+        finally:
+            conn.close()
+        if not df.empty:
+            return df
+
+    excel_df = load_portfolio_from_excel()
+    if not excel_df.empty:
+        return excel_df
+
+    return empty_portfolio_df()
 
 
 def load_latest_snapshot() -> tuple[str | None, pd.DataFrame]:
@@ -910,6 +1045,19 @@ def load_latest_snapshot() -> tuple[str | None, pd.DataFrame]:
         return latest_date, df
     finally:
         conn.close()
+
+
+def get_latest_snapshot_date_on_or_before(snapshot_date: date) -> date | None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT MAX(snapshot_date) FROM snapshots WHERE snapshot_date <= ?",
+            (snapshot_date.isoformat(),),
+        ).fetchone()
+    finally:
+        conn.close()
+    date_text = str(row[0] or "").strip() if row else ""
+    return _safe_parse_date(date_text) if date_text else None
 
 
 def save_snapshot_cash(snapshot_date: date, cash_krw: float | None, cash_usd: float | None) -> None:
@@ -947,6 +1095,25 @@ def load_snapshot_cash(snapshot_date: date) -> tuple[float, float]:
             """,
             (snapshot_date.isoformat(),),
         ).fetchone()
+        if not row:
+            fallback_date_row = conn.execute(
+                """
+                SELECT MAX(snapshot_date)
+                FROM snapshot_cash
+                WHERE snapshot_date <= ?
+                """,
+                (snapshot_date.isoformat(),),
+            ).fetchone()
+            fallback_date = str(fallback_date_row[0] or "").strip() if fallback_date_row else ""
+            if fallback_date:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(cash_krw, 0), COALESCE(cash_usd, 0)
+                    FROM snapshot_cash
+                    WHERE snapshot_date = ?
+                    """,
+                    (fallback_date,),
+                ).fetchone()
     finally:
         conn.close()
     if not row:
@@ -961,7 +1128,7 @@ def get_snapshot_cash_krw(snapshot_date: date, usd_krw_rate: float | None = None
     return cash_total_krw, float(cash_krw), float(cash_usd)
 
 
-def load_history() -> pd.DataFrame:
+def load_history(as_of_date: date | None = None) -> pd.DataFrame:
     conn = get_conn()
     try:
         query = """
@@ -1031,6 +1198,17 @@ def load_history() -> pd.DataFrame:
         return hist_df
 
     hist_df = hist_df.sort_values("snapshot_date")
+    hist_df["is_carry_forward"] = False
+    anchor_date = as_of_date or date.today()
+    today_ts = pd.Timestamp(anchor_date)
+    last_ts = pd.Timestamp(hist_df["snapshot_date"].max())
+    if last_ts.normalize() < today_ts.normalize():
+        carry_row = hist_df.iloc[-1].copy()
+        carry_row["snapshot_date"] = today_ts
+        carry_row["is_carry_forward"] = True
+        hist_df = pd.concat([hist_df, pd.DataFrame([carry_row])], ignore_index=True)
+        hist_df = hist_df.sort_values("snapshot_date")
+
     hist_df["total_principal"] = hist_df["total_value"] - hist_df["total_pnl"]
     hist_df["total_return_pct"] = (
         hist_df["total_pnl"] / hist_df["total_principal"].replace(0, pd.NA)
@@ -3942,7 +4120,7 @@ def get_monthly_return_table(hist_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_date: date) -> None:
-    hist_df = load_history()
+    hist_df = load_history(as_of_date=selected_date)
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">총 자산금액 변화 (꺾은선)</div>', unsafe_allow_html=True)
@@ -3966,13 +4144,15 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
         )
         add_line_labels(core_line_fig, pct=False, last_only=False)
         st.plotly_chart(style_figure(apply_daily_date_axis(core_line_fig)), use_container_width=True)
+        if "is_carry_forward" in hist_df.columns and bool(hist_df.iloc[-1].get("is_carry_forward", False)):
+            st.caption("오늘 스냅샷이 없어 최근 저장 자산값을 오늘 날짜로 동일 반영했습니다.")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">전체 자산 요약</div>', unsafe_allow_html=True)
 
     latest_date, latest_df = load_latest_snapshot()
-    source_df = latest_df if not latest_df.empty else current_df
+    source_df = current_df if not current_df.empty else latest_df
 
     if source_df.empty:
         st.info("저장된 데이터가 없습니다. 기록 입력 탭에서 먼저 스냅샷을 저장해 주세요.")
@@ -3980,7 +4160,8 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
         return
 
     source_df = to_krw_view(source_df, usd_krw_rate)
-    base_date = _safe_parse_date(latest_date) if latest_date else selected_date
+    base_date = selected_date
+    effective_saved_date = get_latest_snapshot_date_on_or_before(selected_date)
     total_value, total_pnl, total_principal, total_return = compute_totals(source_df, usd_krw_rate, base_date)
     cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(base_date, None)
     top_stock_name = "-"
@@ -4000,7 +4181,16 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
     with c4:
         render_summary_card("현재 예수금", format_won(cash_total_krw), f"원화 {cash_krw:,.0f}원 / 달러 {format_usd(cash_usd)}")
     with c5:
-        recent_note = f"최근 저장: {latest_date}" if latest_date else "아직 저장 이력 없음"
+        if effective_saved_date:
+            saved_text = effective_saved_date.isoformat()
+            if effective_saved_date < selected_date:
+                recent_note = f"최근 저장: {saved_text} (미입력일 승계)"
+            else:
+                recent_note = f"최근 저장: {saved_text}"
+        elif latest_date:
+            recent_note = f"최근 저장: {latest_date}"
+        else:
+            recent_note = "엑셀 기준 (DB 미저장)"
         render_summary_card("비중 최대 종목", top_stock_name, f"비중 {top_stock_weight:,.0f}% | {recent_note}")
 
     dist_df = source_df.sort_values(COL_VALUE_KRW, ascending=False).copy()
@@ -6675,26 +6865,34 @@ def main() -> None:
             st.rerun()
         st.subheader("기록 설정")
         selected_date = st.date_input("기록 날짜", value=DEFAULT_DATE)
+        selected_date_key = selected_date.isoformat()
         usd_krw_rate, fx_source = get_usd_krw_rate_for_date(selected_date)
         st.metric("해당일 USD/KRW", f"{usd_krw_rate:,.0f}")
         st.caption(f"환율 소스: {fx_source}")
+        excel_path = resolve_excel_path()
+        if excel_path:
+            st.caption(f"엑셀 자동 불러오기: {excel_path.name}")
         use_sample = st.button("샘플 데이터로 시작", key="sidebar_use_sample_btn")
 
         if st.button("선택 날짜 데이터 불러오기", key="sidebar_load_date_btn"):
             st.session_state["editing_df"] = ensure_portfolio_columns(
                 load_snapshot(selected_date), usd_krw_rate, force_usd_rate=True
             )
+            st.session_state["editing_df_date"] = selected_date_key
             st.success(f"{selected_date} 데이터 불러오기 완료")
 
     if use_sample:
         st.session_state["editing_df"] = ensure_portfolio_columns(
             pd.DataFrame(DEFAULT_HOLDINGS), usd_krw_rate, force_usd_rate=True
         )
+        st.session_state["editing_df_date"] = selected_date_key
 
-    if "editing_df" not in st.session_state:
+    should_reload_for_date = st.session_state.get("editing_df_date", "") != selected_date_key
+    if "editing_df" not in st.session_state or should_reload_for_date:
         st.session_state["editing_df"] = ensure_portfolio_columns(
             load_snapshot(selected_date), usd_krw_rate, force_usd_rate=True
         )
+        st.session_state["editing_df_date"] = selected_date_key
     else:
         st.session_state["editing_df"] = ensure_portfolio_columns(
             st.session_state["editing_df"], usd_krw_rate, force_usd_rate=True
