@@ -3911,9 +3911,6 @@ def get_company_list_ticker(stock_name: str) -> str:
     name = (stock_name or "").strip()
     if not name:
         return ""
-    builtin = get_builtin_ticker_hint(name)
-    if builtin:
-        return builtin
     conn = get_conn()
     try:
         row = conn.execute(
@@ -3923,7 +3920,10 @@ def get_company_list_ticker(stock_name: str) -> str:
     finally:
         conn.close()
     raw = (row[0] or "").strip().upper() if row and row[0] else ""
-    return clean_valid_ticker(raw)
+    saved = clean_valid_ticker(raw)
+    if saved:
+        return saved
+    return get_builtin_ticker_hint(name)
 
 
 def get_company_list_sector(stock_name: str) -> str:
@@ -5929,6 +5929,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         "analysis_company_name_input",
         "analysis_ticker_input",
         "analysis_ticker_source",
+        "analysis_selected_overview_company",
+        "analysis_selected_overview_ticker_input",
+        "analysis_selected_overview_sector_input",
     ]:
         st.session_state[key] = _sanitize_widget_text(st.session_state.get(key), "")
     st.session_state["analysis_company_hint"] = _sanitize_widget_text(
@@ -5947,6 +5950,12 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_watch_image_uploader_nonce"] = 0
     if "analysis_watch_image_enrich_meta" not in st.session_state:
         st.session_state["analysis_watch_image_enrich_meta"] = True
+    if "analysis_selected_overview_company" not in st.session_state:
+        st.session_state["analysis_selected_overview_company"] = ""
+    if "analysis_selected_overview_ticker_input" not in st.session_state:
+        st.session_state["analysis_selected_overview_ticker_input"] = ""
+    if "analysis_selected_overview_sector_input" not in st.session_state:
+        st.session_state["analysis_selected_overview_sector_input"] = ""
 
     add_col1, add_col2, add_col3, add_col4 = st.columns([1.3, 1.0, 1.0, 0.8])
     with add_col1:
@@ -6273,6 +6282,12 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             if 0 <= row_idx < len(overview_df):
                 picked_name = str(overview_df.iloc[row_idx].get("기업명") or "").strip()
                 picked_ticker = clean_valid_ticker(str(overview_df.iloc[row_idx].get("티커") or ""))
+                picked_sector = str(overview_df.iloc[row_idx].get("산업섹터") or "").strip()
+                prev_selected_name = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_company"), "")
+                if picked_name and picked_name != prev_selected_name:
+                    st.session_state["analysis_selected_overview_company"] = picked_name
+                    st.session_state["analysis_selected_overview_ticker_input"] = picked_ticker
+                    st.session_state["analysis_selected_overview_sector_input"] = picked_sector
                 need_apply = False
                 if picked_name and picked_name != current_input_name:
                     st.session_state["analysis_company_name_pending"] = picked_name
@@ -6283,6 +6298,53 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 if need_apply:
                     st.session_state["analysis_company_hint"] = "직접입력"
                     st.rerun()
+
+    selected_company_for_edit = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_company"), "")
+    if selected_company_for_edit:
+        st.markdown("##### 선택 기업 티커/섹터 수정")
+        edit_col1, edit_col2, edit_col3, edit_col4 = st.columns([1.1, 1.1, 1.2, 0.9])
+        with edit_col1:
+            st.caption(f"선택 기업: **{selected_company_for_edit}**")
+        with edit_col2:
+            st.text_input(
+                "수정 티커",
+                key="analysis_selected_overview_ticker_input",
+                placeholder="예: NOV / 005930.KS",
+            )
+        with edit_col3:
+            st.text_input(
+                "수정 산업섹터(선택)",
+                key="analysis_selected_overview_sector_input",
+                placeholder="예: Energy / 반도체",
+            )
+        with edit_col4:
+            save_selected_meta_btn = st.button("선택값 저장", key="analysis_save_selected_meta_btn")
+
+        if save_selected_meta_btn:
+            ticker_raw = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_ticker_input"), "")
+            sector_new = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_sector_input"), "")
+            ticker_new = clean_valid_ticker(ticker_raw)
+            if ticker_raw and not ticker_new:
+                st.warning("티커 형식이 올바르지 않습니다. 예: NOV, AAPL, 005930.KS")
+            elif not ticker_new and not sector_new:
+                st.warning("수정할 티커 또는 산업섹터를 입력해 주세요.")
+            else:
+                upsert_company_list_entry(
+                    selected_company_for_edit,
+                    ticker=ticker_new,
+                    sector=sector_new,
+                    source="manual_edit",
+                )
+                if ticker_new:
+                    st.session_state["analysis_ticker_pending"] = ticker_new
+                    st.session_state["analysis_ticker_source"] = "기업 리스트 수동 수정"
+                st.session_state["analysis_company_name_pending"] = selected_company_for_edit
+                st.session_state["analysis_company_hint"] = "직접입력"
+                st.session_state["analysis_ticker_autofill_notice"] = (
+                    f"{selected_company_for_edit} 수정 저장 완료"
+                    + (f" (티커 {ticker_new})" if ticker_new else "")
+                )
+                st.rerun()
 
     st.markdown("##### AI 설정 (자동 생성/티커 추론)")
     ai_cfg_col1, ai_cfg_col2 = st.columns([1, 1])
