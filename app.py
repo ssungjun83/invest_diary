@@ -221,6 +221,47 @@ def _ticker_matches_market_preference(ticker: str, market_preference: str) -> bo
     return True
 
 
+def _company_name_has_hangul(name: str) -> bool:
+    return bool(re.search(r"[가-힣]", str(name or "")))
+
+
+def _looks_explicit_foreign_company_name(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text:
+        return False
+    upper = text.upper()
+    if "ADR" in upper:
+        return True
+    domestic_tokens = ["코스피", "코스닥", "KOSPI", "KOSDAQ", "KRX", "스팩"]
+    if any(tok in upper for tok in domestic_tokens):
+        return False
+    if re.search(r"\b[A-Z]{3,6}\b", upper):
+        return True
+    if any(tok in upper for tok in [" INC", " CORP", " PLC", " LTD", " HOLDINGS", "HLDGS", " S.A", " NV"]):
+        return True
+    return False
+
+
+def _is_non_kr_ticker_plausible_for_name(company_name: str, ticker: str) -> bool:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
+        return False
+    if tkr.endswith(".KS") or tkr.endswith(".KQ"):
+        return True
+    name = str(company_name or "").strip()
+    if not _company_name_has_hangul(name):
+        return True
+    upper = name.upper()
+    base = tkr.split(".")[0]
+    if base and re.search(rf"(?<![A-Z0-9]){re.escape(base)}(?![A-Z0-9])", upper):
+        return True
+    if "ADR" in upper:
+        return True
+    if _looks_explicit_foreign_company_name(name):
+        return True
+    return False
+
+
 def _name_similarity(query: str, candidate: str) -> float:
     q = normalize_company_name_for_match(query)
     c = normalize_company_name_for_match(candidate)
@@ -2955,6 +2996,10 @@ def resolve_ticker_auto_with_retry(
     provider: str = "openai",
     market_preference: str = "",
 ) -> tuple[str, str]:
+    name = (company_name or "").strip()
+    has_hangul_name = _company_name_has_hangul(name)
+    foreign_name_hint = _looks_explicit_foreign_company_name(name)
+
     ticker, source = resolve_ticker_auto(
         company_name=company_name,
         use_ai=use_ai,
@@ -2963,11 +3008,32 @@ def resolve_ticker_auto_with_retry(
         provider=provider,
         market_preference=market_preference,
     )
+    ticker = clean_valid_ticker(ticker)
     pref = _market_pref_normalized(market_preference)
-    is_kr = str(ticker or "").endswith(".KS") or str(ticker or "").endswith(".KQ")
 
-    # 미분류인데 국내 티커가 잡히거나, 아예 못 찾은 경우 해외 우선으로 1회 재시도.
-    need_retry_foreign = (not ticker) or (pref == "" and is_kr)
+    if ticker and pref == "" and has_hangul_name and not _is_non_kr_ticker_plausible_for_name(name, ticker):
+        source = f"{source} | 한글명 대비 해외티커 신뢰도 낮음"
+        ticker = ""
+
+    is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
+
+    if not ticker and pref == "" and has_hangul_name and not foreign_name_hint:
+        retry_kr, retry_kr_source = resolve_ticker_auto(
+            company_name=company_name,
+            use_ai=False,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            market_preference="domestic",
+        )
+        retry_kr = clean_valid_ticker(retry_kr)
+        if retry_kr.endswith(".KS") or retry_kr.endswith(".KQ"):
+            return retry_kr, f"{retry_kr_source} (국내 우선 재시도)"
+
+    # 해외 우선이 명확할 때만 1회 재시도한다.
+    need_retry_foreign = (pref == "foreign" and (not ticker or is_kr)) or (
+        (not ticker) and (not has_hangul_name or foreign_name_hint)
+    )
     if need_retry_foreign:
         retry_ticker, retry_source = resolve_ticker_auto(
             company_name=company_name,
@@ -2977,6 +3043,7 @@ def resolve_ticker_auto_with_retry(
             provider=provider,
             market_preference="foreign",
         )
+        retry_ticker = clean_valid_ticker(retry_ticker)
         retry_is_kr = str(retry_ticker or "").endswith(".KS") or str(retry_ticker or "").endswith(".KQ")
         if retry_ticker and not retry_is_kr:
             return retry_ticker, f"{retry_source} (해외 우선 재시도)"
@@ -7535,6 +7602,28 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             next_ticker = current_ticker
             next_sector = current_sector
             market_pref = market_pref_map.get(company_name, "")
+            if not market_pref:
+                if row_ticker:
+                    market_pref = "domestic" if (row_ticker.endswith(".KS") or row_ticker.endswith(".KQ")) else "foreign"
+                elif _company_name_has_hangul(company_name) and not _looks_explicit_foreign_company_name(company_name):
+                    market_pref = "domestic"
+
+            if (not force_refresh) and current_ticker:
+                suspicious = False
+                is_kr_ticker = current_ticker.endswith(".KS") or current_ticker.endswith(".KQ")
+                if market_pref == "domestic" and not is_kr_ticker:
+                    suspicious = True
+                elif market_pref == "foreign" and is_kr_ticker:
+                    suspicious = True
+                elif (
+                    _company_name_has_hangul(company_name)
+                    and not _looks_explicit_foreign_company_name(company_name)
+                    and not is_kr_ticker
+                ):
+                    suspicious = True
+                if suspicious:
+                    current_ticker = ""
+                    next_ticker = ""
 
             if not next_ticker:
                 auto_ticker, _ = resolve_ticker_auto_with_retry(
@@ -7547,6 +7636,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 )
                 if auto_ticker:
                     next_ticker = auto_ticker
+
+            if next_ticker and market_pref == "domestic" and not (
+                next_ticker.endswith(".KS") or next_ticker.endswith(".KQ")
+            ):
+                next_ticker = ""
 
             if not next_sector:
                 auto_sector, _ = resolve_sector_auto(
