@@ -115,6 +115,15 @@ AI_PROVIDER_OPTIONS = ["OpenAI", "Claude"]
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_CLAUDE_MODEL = "claude-3-5-haiku-latest"
 DEFAULT_AI_MODEL = DEFAULT_OPENAI_MODEL
+HTTP_HEADERS_COMMON = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 
 
 def normalize_ticker_text(value: str) -> str:
@@ -239,6 +248,7 @@ def choose_best_ticker_candidate(
     scored = []
     q_has_hangul = bool(re.search(r"[가-힣]", str(company_name or "")))
     q_norm = normalize_company_name_for_match(company_name)
+    q_norm_len = len(q_norm)
 
     # 시장 선호가 명확할 때는 후보군 자체를 우선 필터링한다.
     raw_pool = []
@@ -268,6 +278,7 @@ def choose_best_ticker_candidate(
         if not symbol:
             continue
         display_name = str(cand.get("name") or cand.get("description") or "").strip()
+        display_norm = normalize_company_name_for_match(display_name)
         exchange = str(cand.get("exchange") or "").strip()
         region = str(cand.get("region") or "").strip()
         sim = _name_similarity(company_name, display_name or symbol)
@@ -295,11 +306,16 @@ def choose_best_ticker_candidate(
                 score += 0.12
             elif is_other_foreign:
                 score -= 0.04
+        if pref != "domestic" and q_has_hangul and q_norm_len <= 4 and is_kr_ticker:
+            # 짧은 한글명(예: 2~4글자)은 국내 동음이의 종목으로 오탐이 잦아 보수적으로 점수 감점.
+            if q_norm and display_norm and q_norm != display_norm:
+                score -= 0.26
         score = max(0.0, min(1.0, score))
         scored.append(
             {
                 "symbol": symbol,
                 "name": display_name,
+                "name_norm": display_norm,
                 "score": score,
                 "sim": sim,
                 "is_kr_ticker": is_kr_ticker,
@@ -327,6 +343,10 @@ def choose_best_ticker_candidate(
                     f"국내 {best['symbol']}({best['score']:.2f}) vs "
                     f"해외 {best_non_kr['symbol']}({best_non_kr['score']:.2f})"
                 )
+    if pref != "domestic" and q_has_hangul and q_norm_len <= 4 and bool(best.get("is_kr_ticker", False)):
+        best_name_norm = str(best.get("name_norm") or "")
+        if q_norm and best_name_norm and q_norm != best_name_norm and best["sim"] < 0.90:
+            return "", f"{provider_label} 짧은 한글명 오탐 가능성(국내 {best['symbol']})"
     if best["score"] < threshold or ambiguous:
         reason = f"최고 일치도 {best['score']:.2f}"
         if ambiguous:
@@ -1728,26 +1748,135 @@ def get_saved_ticker_hint(company_name: str) -> str:
     return clean_valid_ticker(raw)
 
 
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _fetch_yahoo_search_quotes_cached(company_name: str) -> tuple[list[dict], str]:
+    name = (company_name or "").strip()
+    if not name:
+        return [], "기업명이 비어 있습니다."
+
+    endpoints = [
+        ("https://query2.finance.yahoo.com/v1/finance/search", "query2"),
+        ("https://query1.finance.yahoo.com/v1/finance/search", "query1"),
+    ]
+    last_err = ""
+    for endpoint, endpoint_label in endpoints:
+        for attempt in range(3):
+            try:
+                resp = requests.get(
+                    endpoint,
+                    params={"q": name, "quotesCount": 12, "newsCount": 0},
+                    headers=HTTP_HEADERS_COMMON,
+                    timeout=10,
+                )
+                if resp.status_code == 429:
+                    last_err = f"429 Too Many Requests ({endpoint_label})"
+                    if attempt < 2:
+                        time.sleep(0.8 * (attempt + 1))
+                        continue
+                    break
+                resp.raise_for_status()
+                payload = resp.json() or {}
+                quotes = payload.get("quotes") or []
+                if quotes:
+                    return quotes, endpoint_label
+                break
+            except Exception as exc:
+                last_err = f"{endpoint_label} 조회 실패: {exc}"
+                if attempt < 2:
+                    time.sleep(0.7 * (attempt + 1))
+                    continue
+                break
+
+    return [], last_err or "검색 결과가 없습니다."
+
+
+@st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
+def _load_sec_company_ticker_dataset() -> tuple[list[dict], str]:
+    try:
+        resp = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers={
+                "User-Agent": "invest-diary/1.0 (public app)",
+                "Accept": "application/json",
+            },
+            timeout=16,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    except Exception as exc:
+        return [], f"SEC 목록 조회 실패: {exc}"
+
+    rows = []
+    if isinstance(payload, dict):
+        iterable = payload.values()
+    else:
+        iterable = payload
+    for item in iterable:
+        if not isinstance(item, dict):
+            continue
+        symbol = clean_valid_ticker(str(item.get("ticker") or ""))
+        title = str(item.get("title") or "").strip()
+        if not symbol or not title:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": title,
+                "exchange": "SEC",
+                "region": "United States",
+            }
+        )
+    return rows, ""
+
+
+def search_ticker_sec_dataset(company_name: str, market_preference: str = "") -> tuple[str, str]:
+    name = (company_name or "").strip()
+    if not name:
+        return "", "기업명이 비어 있습니다."
+    if _market_pref_normalized(market_preference) == "domestic":
+        return "", "SEC 검색은 해외 종목용입니다."
+
+    rows, err = _load_sec_company_ticker_dataset()
+    if err:
+        return "", err
+    if not rows:
+        return "", "SEC 목록 데이터가 비어 있습니다."
+
+    q_norm = normalize_company_name_for_match(name)
+    direct = []
+    fuzzy = []
+    for row in rows:
+        title = str(row.get("name") or "").strip()
+        title_norm = normalize_company_name_for_match(title)
+        if q_norm and title_norm and (q_norm in title_norm or title_norm in q_norm):
+            direct.append(row)
+            continue
+        sim = _name_similarity(name, title)
+        if sim >= 0.50:
+            item = dict(row)
+            item["_sim"] = sim
+            fuzzy.append(item)
+
+    candidates = direct
+    if not candidates and fuzzy:
+        fuzzy.sort(key=lambda x: float(x.get("_sim", 0.0)), reverse=True)
+        candidates = fuzzy[:18]
+    if not candidates:
+        return "", "SEC 목록에서 일치 기업을 찾지 못했습니다."
+
+    return choose_best_ticker_candidate(name, candidates, "SEC 목록", market_preference="foreign")
+
+
 def search_ticker_yfinance(company_name: str, market_preference: str = "") -> tuple[str, str]:
     name = (company_name or "").strip()
     if not name:
         return "", "기업명이 비어 있습니다."
 
-    url = "https://query1.finance.yahoo.com/v1/finance/search"
-    try:
-        resp = requests.get(
-            url,
-            params={"q": name, "quotesCount": 10, "newsCount": 0},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as exc:
-        return "", f"yfinance 검색 실패: {exc}"
-
-    quotes = payload.get("quotes") or []
+    quotes, query_source = _fetch_yahoo_search_quotes_cached(name)
     if not quotes:
-        return "", "검색 결과가 없습니다."
+        if "429" in str(query_source):
+            return "", f"yfinance 검색 제한: {query_source}"
+        return "", f"yfinance 검색 실패: {query_source}"
 
     def is_equity(q):
         return str(q.get("quoteType", "")).upper() == "EQUITY"
@@ -1770,7 +1899,10 @@ def search_ticker_yfinance(company_name: str, market_preference: str = "") -> tu
         )
     if not candidates:
         return "", "주식 티커 결과가 없습니다."
-    return choose_best_ticker_candidate(company_name, candidates, "yfinance", market_preference=market_preference)
+    ticker, msg = choose_best_ticker_candidate(name, candidates, "yfinance", market_preference=market_preference)
+    if ticker:
+        return ticker, f"{msg}, {query_source}"
+    return "", msg
 
 
 def search_ticker_alpha_vantage(company_name: str, api_key: str, market_preference: str = "") -> tuple[str, str]:
@@ -2067,6 +2199,79 @@ def infer_sector_with_ai(
     return first[:40], f"AI 추론 ({ai_provider_label(provider)})"
 
 
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def fetch_sector_from_yahoo_asset_profile(ticker: str) -> tuple[str, str]:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
+        return "", "티커가 비어 있습니다."
+
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{tkr}"
+    params = {"modules": "assetProfile"}
+    last_err = ""
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                url,
+                params=params,
+                headers=HTTP_HEADERS_COMMON,
+                timeout=12,
+            )
+            if resp.status_code == 429:
+                last_err = "429 Too Many Requests"
+                if attempt < 2:
+                    time.sleep(0.8 * (attempt + 1))
+                    continue
+                break
+            resp.raise_for_status()
+            payload = resp.json() or {}
+            result_arr = ((payload.get("quoteSummary") or {}).get("result") or [])
+            profile = result_arr[0].get("assetProfile") if result_arr and isinstance(result_arr[0], dict) else {}
+            if not isinstance(profile, dict):
+                profile = {}
+            sector = str(profile.get("sector") or "").strip()
+            industry = str(profile.get("industry") or "").strip()
+            picked = sector or industry
+            if picked:
+                return picked, "yahoo_asset_profile"
+            return "", "assetProfile에 섹터 정보 없음"
+        except Exception as exc:
+            last_err = str(exc)
+            if attempt < 2:
+                time.sleep(0.7 * (attempt + 1))
+                continue
+            break
+    return "", f"yahoo assetProfile 조회 실패: {last_err}"
+
+
+def infer_sector_from_name_heuristic(company_name: str, ticker: str = "") -> str:
+    text = f"{str(company_name or '').strip()} {str(ticker or '').strip().upper()}".strip().upper()
+    if not text:
+        return ""
+    if "ETF" in text or text.endswith(".KS") and "KODEX" in text:
+        return "ETF"
+    if any(token in text for token in ["REIT", "리츠"]):
+        return "REIT"
+    if any(token in text for token in ["BANK", "은행", "FINANCE", "금융", "증권", "INSURANCE", "보험"]):
+        return "Finance"
+    if any(token in text for token in ["BIO", "PHARMA", "헬스", "제약", "바이오", "MEDICAL"]):
+        return "Healthcare"
+    if any(token in text for token in ["SEMICON", "반도체", "SOFTWARE", "CLOUD", "DATA", "TECH"]):
+        return "Technology"
+    if any(token in text for token in ["SHIP", "조선", "해운", "물류", "MARINE"]):
+        return "해운/조선"
+    if any(token in text for token in ["STEEL", "철강", "METAL", "금속", "소재", "화학", "CHEM"]):
+        return "소재/산업재"
+    if any(token in text for token in ["AUTO", "자동차", "EV", "BATTERY", "배터리"]):
+        return "자동차/배터리"
+    if any(token in text for token in ["CONSTRUCT", "건설", "INFRA", "ENGINEERING", "토목"]):
+        return "건설/인프라"
+    if any(token in text for token in ["OIL", "GAS", "에너지", "ENERGY", "POWER", "전력"]):
+        return "에너지"
+    if any(token in text for token in ["CONSUMER", "RETAIL", "유통", "식품", "FOOD", "BEVERAGE"]):
+        return "소비재"
+    return ""
+
+
 def resolve_ticker_auto(
     company_name: str,
     use_ai: bool,
@@ -2092,6 +2297,13 @@ def resolve_ticker_auto(
     if yf_ticker and _ticker_matches_market_preference(yf_ticker, pref):
         return yf_ticker, yf_source
 
+    sec_ticker = ""
+    sec_source = ""
+    if pref != "domestic":
+        sec_ticker, sec_source = search_ticker_sec_dataset(name, market_preference=market_preference)
+        if sec_ticker and _ticker_matches_market_preference(sec_ticker, "foreign"):
+            return sec_ticker, sec_source
+
     alpha_key, finnhub_key = get_market_data_api_keys()
     alpha_source = ""
     fin_source = ""
@@ -2105,7 +2317,9 @@ def resolve_ticker_auto(
             return fin_ticker, fin_source
 
     ai_source_msg = ""
-    if use_ai and api_key:
+    yf_429 = "429" in str(yf_source or "")
+    force_ai = bool(api_key) and (pref == "foreign" or yf_429)
+    if (use_ai or force_ai) and api_key:
         ai_ticker, ai_source = infer_ticker_with_ai(
             name,
             api_key,
@@ -2114,10 +2328,12 @@ def resolve_ticker_auto(
             market_preference=market_preference,
         )
         if ai_ticker and _ticker_matches_market_preference(ai_ticker, pref):
-            return ai_ticker, ai_source
+            if use_ai:
+                return ai_ticker, ai_source
+            return ai_ticker, f"{ai_source} (자동 보조)"
         ai_source_msg = ai_source or "AI 시장선호 조건 불일치"
 
-    fallback_msgs = [msg for msg in [ai_source_msg, yf_source, alpha_source, fin_source] if msg]
+    fallback_msgs = [msg for msg in [ai_source_msg, yf_source, sec_source, alpha_source, fin_source] if msg]
     return "", " | ".join(fallback_msgs) if fallback_msgs else "티커 자동 탐색에 실패했습니다."
 
 
@@ -5317,7 +5533,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     if "analysis_note" not in st.session_state:
         st.session_state["analysis_note"] = ""
     if "analysis_use_ai_ticker" not in st.session_state:
-        st.session_state["analysis_use_ai_ticker"] = False
+        st.session_state["analysis_use_ai_ticker"] = True
     legacy_analysis_model = str(
         st.session_state.get(
             "analysis_ai_model",
@@ -5414,11 +5630,17 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         else:
             resolved_sector = new_sector
             if not resolved_sector and new_ticker:
-                fetched_summary, fetched_err, _ = fetch_company_financial_summary_multi_source(new_ticker)
-                if fetched_summary:
-                    resolved_sector = (fetched_summary.get("sector") or "").strip()
-                elif fetched_err:
-                    st.caption(f"섹터 자동 조회 실패: {fetched_err}")
+                fast_sector, fast_src = fetch_sector_from_yahoo_asset_profile(new_ticker)
+                if fast_sector:
+                    resolved_sector = fast_sector
+                else:
+                    fetched_summary, fetched_err, _ = fetch_company_financial_summary_multi_source(new_ticker)
+                    if fetched_summary:
+                        resolved_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
+                    elif fetched_err:
+                        st.caption(f"섹터 자동 조회 실패: {fetched_err} / {fast_src}")
+            if not resolved_sector:
+                resolved_sector = infer_sector_from_name_heuristic(new_name, new_ticker)
             upsert_company_list_entry(new_name, new_ticker, sector=resolved_sector, source="manual")
             st.session_state["analysis_new_company_name"] = ""
             st.session_state["analysis_new_company_ticker"] = ""
@@ -5482,88 +5704,95 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             }
         )
     auto_fill_missing_btn = st.button(
-        "빈 티커/산업섹터 일괄 채우기 (AI)",
+        "빈 티커/산업섹터 일괄 채우기 (API+AI)",
         key="analysis_fill_missing_company_meta_btn",
     )
     if auto_fill_missing_btn:
         ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
-        if not ai_api_key:
-            st.warning("AI 설정에 API 키가 필요합니다. API 설정 탭 또는 AI 설정 영역에서 키를 입력해 주세요.")
+        targets = [row for row in overview_rows if not str(row.get("티커") or "").strip() or not str(row.get("산업섹터") or "").strip()]
+        if not targets:
+            st.info("이미 모든 기업에 티커/산업섹터 정보가 있습니다.")
         else:
-            targets = [row for row in overview_rows if not str(row.get("티커") or "").strip() or not str(row.get("산업섹터") or "").strip()]
-            if not targets:
-                st.info("이미 모든 기업에 티커/산업섹터 정보가 있습니다.")
-            else:
-                updated_count = 0
-                skipped_count = 0
-                unresolved = []
-                with st.spinner("빈 정보만 자동으로 찾는 중입니다..."):
-                    for row in targets:
-                        company_name = str(row.get("기업명") or "").strip()
-                        current_ticker = clean_valid_ticker(str(row.get("티커") or ""))
-                        current_sector = str(row.get("산업섹터") or "").strip()
-                        if not company_name:
-                            skipped_count += 1
-                            continue
+            updated_count = 0
+            skipped_count = 0
+            unresolved = []
+            with st.spinner("빈 정보만 자동으로 찾는 중입니다..."):
+                for row in targets:
+                    company_name = str(row.get("기업명") or "").strip()
+                    current_ticker = clean_valid_ticker(str(row.get("티커") or ""))
+                    current_sector = str(row.get("산업섹터") or "").strip()
+                    if not company_name:
+                        skipped_count += 1
+                        continue
 
-                        next_ticker = current_ticker
-                        next_sector = current_sector
-                        market_pref = market_pref_map.get(company_name, "")
+                    next_ticker = current_ticker
+                    next_sector = current_sector
+                    market_pref = market_pref_map.get(company_name, "")
 
-                        if not next_ticker:
-                            auto_ticker, _ = resolve_ticker_auto_with_retry(
-                                company_name,
-                                use_ai=True,
-                                api_key=ai_api_key,
-                                model=ai_model,
-                                provider=ai_provider,
-                                market_preference=market_pref,
-                            )
-                            if auto_ticker:
-                                next_ticker = auto_ticker
+                    if not next_ticker:
+                        auto_ticker, _ = resolve_ticker_auto_with_retry(
+                            company_name,
+                            use_ai=bool(ai_api_key),
+                            api_key=ai_api_key,
+                            model=ai_model,
+                            provider=ai_provider,
+                            market_preference=market_pref,
+                        )
+                        if auto_ticker:
+                            next_ticker = auto_ticker
 
-                        if not next_sector:
-                            ai_sector, _ = infer_sector_with_ai(
-                                company_name,
-                                ticker=next_ticker,
-                                api_key=ai_api_key,
-                                model=ai_model,
-                                provider=ai_provider,
-                            )
-                            if ai_sector:
-                                next_sector = ai_sector
-                            elif next_ticker:
-                                fetched_summary, _, _ = fetch_company_financial_summary_multi_source(next_ticker)
-                                if fetched_summary:
-                                    next_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
+                    if not next_sector and next_ticker:
+                        fast_sector, _ = fetch_sector_from_yahoo_asset_profile(next_ticker)
+                        if fast_sector:
+                            next_sector = fast_sector
 
-                        changed = (next_ticker != current_ticker) or (next_sector != current_sector)
-                        has_any_new = bool(next_ticker or next_sector)
-                        if changed and has_any_new:
-                            upsert_company_list_entry(
-                                company_name,
-                                next_ticker,
-                                sector=next_sector,
-                                source="auto_fill_ai",
-                            )
-                            updated_count += 1
-                        else:
-                            skipped_count += 1
-                            if (not next_ticker) or (not next_sector):
-                                unresolved.append(company_name)
+                    if not next_sector and next_ticker:
+                        fetched_summary, _, _ = fetch_company_financial_summary_multi_source(next_ticker)
+                        if fetched_summary:
+                            next_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
 
-                if updated_count > 0:
-                    st.session_state["analysis_bulk_fill_notice"] = (
-                        f"일괄 채우기 완료: 업데이트 {updated_count}개, 유지/실패 {skipped_count}개"
-                    )
-                elif skipped_count > 0:
-                    st.session_state["analysis_bulk_fill_notice"] = "일괄 채우기 결과: 새로 업데이트된 항목이 없습니다."
-                if unresolved:
-                    preview = ", ".join(unresolved[:8])
-                    remain = len(unresolved) - min(8, len(unresolved))
-                    tail = f" 외 {remain}개" if remain > 0 else ""
-                    st.session_state["analysis_bulk_fill_warning"] = f"일부 항목은 여전히 빈 값입니다: {preview}{tail}"
-                st.rerun()
+                    if not next_sector and ai_api_key:
+                        ai_sector, _ = infer_sector_with_ai(
+                            company_name,
+                            ticker=next_ticker,
+                            api_key=ai_api_key,
+                            model=ai_model,
+                            provider=ai_provider,
+                        )
+                        if ai_sector:
+                            next_sector = ai_sector
+
+                    if not next_sector:
+                        next_sector = infer_sector_from_name_heuristic(company_name, next_ticker)
+
+                    changed = (next_ticker != current_ticker) or (next_sector != current_sector)
+                    has_any_new = bool(next_ticker or next_sector)
+                    if changed and has_any_new:
+                        source_tag = "auto_fill_ai" if ai_api_key else "auto_fill"
+                        upsert_company_list_entry(
+                            company_name,
+                            next_ticker,
+                            sector=next_sector,
+                            source=source_tag,
+                        )
+                        updated_count += 1
+                    else:
+                        skipped_count += 1
+                        if (not next_ticker) or (not next_sector):
+                            unresolved.append(company_name)
+
+            if updated_count > 0:
+                st.session_state["analysis_bulk_fill_notice"] = (
+                    f"일괄 채우기 완료: 업데이트 {updated_count}개, 유지/실패 {skipped_count}개"
+                )
+            elif skipped_count > 0:
+                st.session_state["analysis_bulk_fill_notice"] = "일괄 채우기 결과: 새로 업데이트된 항목이 없습니다."
+            if unresolved:
+                preview = ", ".join(unresolved[:8])
+                remain = len(unresolved) - min(8, len(unresolved))
+                tail = f" 외 {remain}개" if remain > 0 else ""
+                st.session_state["analysis_bulk_fill_warning"] = f"일부 항목은 여전히 빈 값입니다: {preview}{tail}"
+            st.rerun()
 
     if "analysis_bulk_fill_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_bulk_fill_notice"))
@@ -5623,7 +5852,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         selected_provider, _, selected_model = get_ai_settings_from_session("analysis")
         st.caption(
             f"현재 선택: {ai_provider_label(selected_provider)} / 모델 {selected_model}. "
-            "선택된 제공자의 키/모델이 티커 추론과 기업분석 생성에 사용됩니다."
+            "티커는 yfinance→SEC(해외)→Alpha/Finnhub→AI 순으로 보강 탐색합니다."
         )
 
     c1, c2, c3, c4 = st.columns([1, 1.3, 1.1, 1.2])
@@ -6318,7 +6547,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
     if "score_ticker_source" not in st.session_state:
         st.session_state["score_ticker_source"] = ""
     if "score_use_ai" not in st.session_state:
-        st.session_state["score_use_ai"] = False
+        st.session_state["score_use_ai"] = True
     legacy_score_model = str(st.session_state.get("score_ai_model", DEFAULT_OPENAI_MODEL) or "")
     if "score_ai_provider" not in st.session_state:
         st.session_state["score_ai_provider"] = "claude" if "claude" in legacy_score_model.lower() else "openai"
@@ -6374,7 +6603,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
         score_provider, _, score_model = get_ai_settings_from_session("score")
         st.caption(
             f"현재 선택: {ai_provider_label(score_provider)} / 모델 {score_model}. "
-            "기본은 yfinance 자동 검색, 실패 시 선택한 AI로 티커 추론을 시도합니다."
+            "기본은 yfinance→SEC(해외)→Alpha/Finnhub 순, 필요 시 AI 추론을 추가로 시도합니다."
         )
 
     top_col1, top_col2, top_col3, top_col4 = st.columns([1, 1.2, 1.1, 1.2])
