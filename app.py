@@ -2694,6 +2694,169 @@ def extract_holdings_from_image_with_ai(
     return parsed, ""
 
 
+def extract_company_watchlist_from_image_with_ai(
+    image_bytes: bytes,
+    mime_type: str,
+    provider: str,
+    api_key: str,
+    model: str,
+) -> tuple[list[dict], str]:
+    key = (api_key or "").strip()
+    if not key:
+        return [], "API 설정 탭 또는 기업정보의 AI 설정에 API 키를 먼저 입력해 주세요."
+    if not image_bytes:
+        return [], "이미지 데이터가 비어 있습니다."
+
+    normalized_provider = normalize_ai_provider(provider)
+    selected_model = (
+        str(model).strip()
+        or (DEFAULT_CLAUDE_MODEL if normalized_provider == "claude" else DEFAULT_OPENAI_MODEL)
+    )
+    media_type = str(mime_type or "image/png").strip().lower()
+    if not media_type.startswith("image/"):
+        media_type = "image/png"
+
+    system_prompt = (
+        "너는 기업명/티커/섹터 목록 OCR 구조화 엔진이다. "
+        "보이는 기업 리스트를 정확히 읽고 JSON만 출력한다."
+    )
+    user_prompt = """
+다음 형식 JSON만 출력:
+{
+  "companies": [
+    {
+      "stock_name": "기업명",
+      "ticker": "야후 티커(없으면 빈문자열)",
+      "sector": "산업섹터(없으면 빈문자열)"
+    }
+  ]
+}
+
+규칙:
+- 관심종목/기업리스트 영역에서 보이는 기업행만 추출
+- 숫자(수량/평가금/손익)는 무시
+- 기업명은 최대한 정확히, 티커는 대문자/점(.) 포함 원문 유지
+- 확실하지 않은 값은 빈문자열
+- 설명 문장 없이 JSON만
+""".strip()
+
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    try:
+        if normalized_provider == "claude":
+            body = {
+                "model": selected_model,
+                "max_tokens": 2000,
+                "temperature": 0.0,
+                "system": system_prompt,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": media_type, "data": image_b64},
+                            },
+                            {"type": "text", "text": user_prompt},
+                        ],
+                    }
+                ],
+            }
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=35,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            pieces = []
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    pieces.append(str(block.get("text", "")))
+            text = "\n".join([p for p in pieces if p]).strip()
+        else:
+            data_url = f"data:{media_type};base64,{image_b64}"
+            body = {
+                "model": selected_model,
+                "input": [
+                    {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": user_prompt},
+                            {"type": "input_image", "image_url": data_url},
+                        ],
+                    },
+                ],
+                "temperature": 0.0,
+                "max_output_tokens": 2000,
+            }
+            resp = requests.post(
+                "https://api.openai.com/v1/responses",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body,
+                timeout=35,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = _extract_openai_output_text(data)
+    except Exception as exc:
+        return [], f"{ai_provider_label(normalized_provider)} 이미지 분석 실패: {exc}"
+
+    if not text:
+        return [], "AI 응답이 비어 있습니다."
+
+    parsed = _extract_json_from_text(text)
+    if not parsed:
+        return [], "AI 응답에서 JSON을 파싱하지 못했습니다."
+
+    raw_items = []
+    if isinstance(parsed, list):
+        raw_items = parsed
+    elif isinstance(parsed, dict):
+        for key_name in ["companies", "watchlist", "company_list", "items", "rows", "holdings"]:
+            candidate = parsed.get(key_name)
+            if isinstance(candidate, list):
+                raw_items = candidate
+                break
+        if not raw_items:
+            single = parsed.get("company")
+            if isinstance(single, dict):
+                raw_items = [single]
+
+    normalized_rows = []
+    seen_names = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        stock_name = str(
+            item.get("stock_name")
+            or item.get("company_name")
+            or item.get("name")
+            or item.get("기업명")
+            or item.get("종목명")
+            or ""
+        ).strip()
+        if not stock_name:
+            continue
+        name_key = normalize_company_name_for_match(stock_name)
+        if not name_key or name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+        ticker = clean_valid_ticker(
+            str(item.get("ticker") or item.get("symbol") or item.get("티커") or "").strip()
+        )
+        sector = str(item.get("sector") or item.get("industry") or item.get("산업섹터") or "").strip()
+        normalized_rows.append({"stock_name": stock_name, "ticker": ticker, "sector": sector})
+
+    return normalized_rows, ""
+
+
 def fetch_company_metrics_from_yfinance(ticker: str) -> tuple[dict, str, str]:
     ticker = (ticker or "").strip()
     if not ticker:
@@ -5592,6 +5755,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         "openai",
     )
     st.session_state["analysis_use_ai_ticker"] = _to_bool_flag(st.session_state.get("analysis_use_ai_ticker", False))
+    st.session_state["analysis_watch_image_enrich_meta"] = _to_bool_flag(
+        st.session_state.get("analysis_watch_image_enrich_meta", True)
+    )
     for key in [
         "analysis_openai_api_key",
         "analysis_claude_api_key",
@@ -5610,6 +5776,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_new_company_ticker"] = ""
     if "analysis_new_company_sector" not in st.session_state:
         st.session_state["analysis_new_company_sector"] = ""
+    if "analysis_watch_image_uploader_nonce" not in st.session_state:
+        st.session_state["analysis_watch_image_uploader_nonce"] = 0
+    if "analysis_watch_image_enrich_meta" not in st.session_state:
+        st.session_state["analysis_watch_image_enrich_meta"] = True
 
     add_col1, add_col2, add_col3, add_col4 = st.columns([1.3, 1.0, 1.0, 0.8])
     with add_col1:
@@ -5673,6 +5843,116 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 st.session_state["analysis_ticker_pending"] = ""
             st.success(f"{remove_name} 기업을 추가 리스트에서 삭제했습니다.")
             st.rerun()
+
+    st.markdown("##### 이미지로 관심종목 리스트 추가 (AI)")
+    st.caption("여기서 추가되는 항목은 보유현황이 아니라 기업 리스트(관심종목)만 업데이트됩니다.")
+    watch_uploader_key = f"analysis_watch_image_uploader_{st.session_state['analysis_watch_image_uploader_nonce']}"
+    watch_col1, watch_col2 = st.columns([1.35, 1.0])
+    with watch_col1:
+        watch_image = st.file_uploader(
+            "관심종목 이미지",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=watch_uploader_key,
+        )
+    with watch_col2:
+        st.checkbox(
+            "티커/산업섹터 자동 보강",
+            key="analysis_watch_image_enrich_meta",
+            help="이미지에서 빈 값이면 API/AI로 티커와 섹터를 추가 탐색합니다.",
+        )
+        watch_import_btn = st.button(
+            "이미지로 관심종목 추가",
+            key="analysis_watch_image_import_btn",
+            type="primary",
+        )
+
+    if watch_image is not None:
+        st.image(watch_image, caption="업로드된 관심종목 이미지", use_container_width=True)
+
+    if watch_import_btn:
+        if watch_image is None:
+            st.warning("먼저 이미지를 업로드해 주세요.")
+        else:
+            ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+            parsed_rows, parse_err = extract_company_watchlist_from_image_with_ai(
+                image_bytes=watch_image.getvalue(),
+                mime_type=str(getattr(watch_image, "type", "") or "image/png"),
+                provider=ai_provider,
+                api_key=ai_api_key,
+                model=ai_model,
+            )
+            if parse_err:
+                st.error(parse_err)
+            elif not parsed_rows:
+                st.warning("이미지에서 기업 목록을 찾지 못했습니다. 더 선명한 표/목록 이미지를 사용해 주세요.")
+            else:
+                enrich_meta = bool(st.session_state.get("analysis_watch_image_enrich_meta", True))
+                inserted_count = 0
+                unresolved = []
+                first_added_name = ""
+                with st.spinner("관심종목 리스트에 반영 중입니다..."):
+                    for item in parsed_rows:
+                        if not isinstance(item, dict):
+                            continue
+                        stock_name = str(item.get("stock_name") or "").strip()
+                        if not stock_name:
+                            continue
+                        ticker = clean_valid_ticker(str(item.get("ticker") or ""))
+                        sector = str(item.get("sector") or "").strip()
+                        market_pref = market_pref_map.get(stock_name, "")
+
+                        if enrich_meta and not ticker:
+                            auto_ticker, _ = resolve_ticker_auto_with_retry(
+                                stock_name,
+                                use_ai=bool(ai_api_key),
+                                api_key=ai_api_key,
+                                model=ai_model,
+                                provider=ai_provider,
+                                market_preference=market_pref,
+                            )
+                            if auto_ticker:
+                                ticker = auto_ticker
+
+                        if enrich_meta and not sector and ticker:
+                            fast_sector, _ = fetch_sector_from_yahoo_asset_profile(ticker)
+                            if fast_sector:
+                                sector = fast_sector
+                        if enrich_meta and not sector and ticker:
+                            fetched_summary, _, _ = fetch_company_financial_summary_multi_source(ticker)
+                            if fetched_summary:
+                                sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
+                        if enrich_meta and not sector and ai_api_key:
+                            ai_sector, _ = infer_sector_with_ai(
+                                stock_name,
+                                ticker=ticker,
+                                api_key=ai_api_key,
+                                model=ai_model,
+                                provider=ai_provider,
+                            )
+                            if ai_sector:
+                                sector = ai_sector
+                        if not sector:
+                            sector = infer_sector_from_name_heuristic(stock_name, ticker)
+
+                        upsert_company_list_entry(stock_name, ticker, sector=sector, source="image_watch_ai")
+                        inserted_count += 1
+                        if not first_added_name:
+                            first_added_name = stock_name
+                        if not ticker or not sector:
+                            unresolved.append(stock_name)
+
+                st.session_state["analysis_watch_image_uploader_nonce"] += 1
+                if first_added_name:
+                    st.session_state["analysis_company_name_pending"] = first_added_name
+                unresolved_count = len(set(unresolved))
+                msg = f"이미지 관심종목 추가 완료: {inserted_count}개 반영"
+                if unresolved_count > 0:
+                    msg += f" / 티커·섹터 일부 미완성 {unresolved_count}개"
+                st.session_state["analysis_watch_image_notice"] = msg
+                st.rerun()
+
+    if "analysis_watch_image_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_watch_image_notice"))
 
     holding_set = set(stock_names)
     listed_set = set(listed_names)
