@@ -39,6 +39,7 @@ COL_CURRENCY = "통화"
 COL_FX_RATE = "환율(원화기준)"
 COL_VALUE_KRW = "평가금액(원화)"
 COL_PNL_KRW = "손익금액(원화)"
+COL_PRICE_KRW = "주가(원화)"
 
 DEFAULT_USD_KRW = 1350.0
 
@@ -4708,13 +4709,13 @@ def style_market_detail_table(df: pd.DataFrame):
         return df
 
     view = df.copy()
-    numeric_cols = [COL_QTY, "투자금액(원)", COL_VALUE_KRW, COL_PNL_KRW, COL_RETURN, "비중(%)"]
+    numeric_cols = [COL_QTY, COL_PRICE_KRW, "투자금액(원)", COL_VALUE_KRW, COL_PNL_KRW, COL_RETURN, "비중(%)"]
     for col in numeric_cols:
         if col in view.columns:
             view[col] = pd.to_numeric(view[col], errors="coerce")
 
     fmt_map = {}
-    for col in [COL_QTY, "투자금액(원)", COL_VALUE_KRW, COL_PNL_KRW]:
+    for col in [COL_QTY, COL_PRICE_KRW, "투자금액(원)", COL_VALUE_KRW, COL_PNL_KRW]:
         if col in view.columns:
             fmt_map[col] = "{:,.0f}"
     if COL_RETURN in view.columns:
@@ -5486,6 +5487,12 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         st.markdown("#### 국내/해외 보유 리스트 한눈에 보기")
         market_view_df = build_holdings_market_view(cleaned_df, usd_krw_rate)
         market_view_df["투자금액(원)"] = market_view_df[COL_VALUE_KRW] - market_view_df[COL_PNL_KRW]
+        market_qty = pd.to_numeric(market_view_df[COL_QTY], errors="coerce")
+        market_view_df[COL_PRICE_KRW] = (
+            pd.to_numeric(market_view_df[COL_VALUE_KRW], errors="coerce")
+            / market_qty.replace(0, pd.NA)
+        )
+        market_view_df[COL_PRICE_KRW] = market_view_df[COL_PRICE_KRW].fillna(0.0)
         group_summary = (
             market_view_df.groupby("시장구분", as_index=False)
             .agg(
@@ -5557,6 +5564,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             "티커",
             COL_CURRENCY,
             COL_QTY,
+            COL_PRICE_KRW,
             "투자금액(원)",
             COL_VALUE_KRW,
             COL_PNL_KRW,
@@ -5752,6 +5760,13 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     st.markdown("---")
     st.markdown("#### 수동 입력 테이블")
     prepared_df = ensure_portfolio_columns(cleaned_df, usd_krw_rate, force_usd_rate=True)
+    prepared_view = to_krw_view(prepared_df, usd_krw_rate, force_usd_rate=True)
+    prepared_qty = pd.to_numeric(prepared_df[COL_QTY], errors="coerce")
+    prepared_df[COL_PRICE_KRW] = (
+        pd.to_numeric(prepared_view[COL_VALUE_KRW], errors="coerce")
+        / prepared_qty.replace(0, pd.NA)
+    )
+    prepared_df[COL_PRICE_KRW] = prepared_df[COL_PRICE_KRW].fillna(0.0)
     table_df = st.data_editor(
         prepared_df,
         num_rows="dynamic",
@@ -5765,9 +5780,10 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             COL_VALUE: st.column_config.NumberColumn(COL_VALUE, min_value=0, format="localized"),
             COL_PNL: st.column_config.NumberColumn(COL_PNL, format="localized"),
             COL_RETURN: st.column_config.NumberColumn(COL_RETURN, format="localized"),
+            COL_PRICE_KRW: st.column_config.NumberColumn(COL_PRICE_KRW, format="localized"),
         },
-        column_order=COLUMNS,
-        disabled=[COL_FX_RATE],
+        column_order=COLUMNS + [COL_PRICE_KRW],
+        disabled=[COL_FX_RATE, COL_PRICE_KRW],
     )
     final_df = ensure_numeric(table_df, usd_krw_rate)
 
