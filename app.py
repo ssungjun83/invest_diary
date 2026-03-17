@@ -2162,7 +2162,9 @@ def normalize_ai_provider(provider: str) -> str:
     p = (provider or "").strip().lower()
     if p in {"claude", "anthropic"}:
         return "claude"
-    return "openai"
+    if p in {"openai", "gpt"}:
+        return "openai"
+    return "claude"
 
 
 def ai_provider_label(provider: str) -> str:
@@ -4347,13 +4349,19 @@ def delete_company_compare_set(set_name: str) -> None:
 
 
 def get_ai_settings_from_session(prefix: str) -> tuple[str, str, str]:
-    provider = normalize_ai_provider(st.session_state.get(f"{prefix}_ai_provider", "openai"))
+    _ = prefix
+    provider = normalize_ai_provider(st.session_state.get("global_ai_provider", "claude"))
+    openai_key = (st.session_state.get("global_openai_api_key", "") or "").strip()
+    claude_key = (st.session_state.get("global_claude_api_key", "") or "").strip()
+    openai_model = (st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+    claude_model = (st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
+
     if provider == "claude":
-        api_key = (st.session_state.get(f"{prefix}_claude_api_key", "") or "").strip()
-        model = (st.session_state.get(f"{prefix}_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
+        api_key = claude_key
+        model = claude_model
     else:
-        api_key = (st.session_state.get(f"{prefix}_openai_api_key", "") or "").strip()
-        model = (st.session_state.get(f"{prefix}_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+        api_key = openai_key
+        model = openai_model
     return provider, api_key, model
 
 
@@ -4658,7 +4666,7 @@ def save_app_settings(settings: dict[str, str]) -> None:
 def initialize_api_settings(force: bool = False) -> None:
     settings = load_app_settings()
     store_sensitive = _to_bool_flag(settings.get("store_sensitive_keys", "false"))
-    global_provider = normalize_ai_provider(settings.get("ai_provider", "openai"))
+    global_provider = normalize_ai_provider(settings.get("ai_provider", "claude"))
     global_openai_key = settings.get("openai_api_key", "") if store_sensitive else ""
     global_claude_key = settings.get("claude_api_key", "") if store_sensitive else ""
     global_alpha_key = settings.get("alpha_vantage_api_key", "") if store_sensitive else ""
@@ -4712,13 +4720,13 @@ def initialize_api_settings(force: bool = False) -> None:
                 st.session_state[k] = v
 
     if force or "score_ai_api_key" not in st.session_state:
-        st.session_state["score_ai_api_key"] = global_openai_key
+        st.session_state["score_ai_api_key"] = global_claude_key
     if force or "analysis_ai_api_key" not in st.session_state:
-        st.session_state["analysis_ai_api_key"] = global_openai_key
+        st.session_state["analysis_ai_api_key"] = global_claude_key
     if force or "score_ai_model" not in st.session_state:
-        st.session_state["score_ai_model"] = global_openai_model
+        st.session_state["score_ai_model"] = global_claude_model
     if force or "analysis_ai_model" not in st.session_state:
-        st.session_state["analysis_ai_model"] = global_openai_model
+        st.session_state["analysis_ai_model"] = global_claude_model
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -6205,7 +6213,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         or ""
     )
     if "analysis_ai_provider" not in st.session_state:
-        st.session_state["analysis_ai_provider"] = "claude" if "claude" in legacy_analysis_model.lower() else "openai"
+        st.session_state["analysis_ai_provider"] = normalize_ai_provider(
+            st.session_state.get("global_ai_provider", "claude")
+        )
     if "analysis_openai_api_key" not in st.session_state:
         st.session_state["analysis_openai_api_key"] = st.session_state.get(
             "analysis_ai_api_key",
@@ -6252,7 +6262,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     st.session_state["analysis_ai_provider"] = _coerce_choice(
         st.session_state.get("analysis_ai_provider"),
         {"openai", "claude"},
-        "openai",
+        "claude",
     )
     st.session_state["analysis_use_ai_ticker"] = _to_bool_flag(st.session_state.get("analysis_use_ai_ticker", False))
     st.session_state["analysis_watch_image_enrich_meta"] = _to_bool_flag(
@@ -6776,26 +6786,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 )
                 st.rerun()
 
-    st.markdown("##### AI 설정 (자동 생성/티커 추론)")
-    ai_cfg_col1, ai_cfg_col2 = st.columns([1, 1])
-    with ai_cfg_col1:
-        st.checkbox("yfinance 티커 검색 실패 시 AI 티커 추론 사용", key="analysis_use_ai_ticker")
-        st.selectbox(
-            "AI 제공자",
-            options=["openai", "claude"],
-            format_func=lambda x: ai_provider_label(x),
-            key="analysis_ai_provider",
-        )
-        st.text_input("OpenAI API Key", key="analysis_openai_api_key", type="password", placeholder="sk-...")
-        st.text_input("Claude API Key", key="analysis_claude_api_key", type="password", placeholder="sk-ant-...")
-    with ai_cfg_col2:
-        st.text_input("OpenAI 모델", key="analysis_openai_model")
-        st.text_input("Claude 모델", key="analysis_claude_model")
-        selected_provider, _, selected_model = get_ai_settings_from_session("analysis")
-        st.caption(
-            f"현재 선택: {ai_provider_label(selected_provider)} / 모델 {selected_model}. "
-            "티커는 웹검색→yfinance→SEC(해외)→Alpha/Finnhub→AI 순으로 보강 탐색합니다."
-        )
+    st.markdown("##### AI 옵션")
+    st.checkbox("yfinance 티커 검색 실패 시 AI 티커 추론 사용", key="analysis_use_ai_ticker")
+    st.caption("AI 키/모델/제공자는 API 설정 탭의 공통값을 사용합니다.")
 
     c1, c2, c3, c4 = st.columns([1, 1.3, 1.1, 1.2])
     with c1:
@@ -6960,14 +6953,14 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 if ai_err:
                     fallback_provider = "openai" if normalize_ai_provider(analysis_ai_provider) == "claude" else "claude"
                     fallback_key = (
-                        st.session_state.get("analysis_openai_api_key", "")
+                        st.session_state.get("global_openai_api_key", "")
                         if fallback_provider == "openai"
-                        else st.session_state.get("analysis_claude_api_key", "")
+                        else st.session_state.get("global_claude_api_key", "")
                     )
                     fallback_model = (
-                        st.session_state.get("analysis_openai_model", DEFAULT_OPENAI_MODEL)
+                        st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL)
                         if fallback_provider == "openai"
-                        else st.session_state.get("analysis_claude_model", DEFAULT_CLAUDE_MODEL)
+                        else st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL)
                     )
                     fallback_key = (fallback_key or "").strip()
                     fallback_model = (fallback_model or "").strip()
@@ -7509,7 +7502,9 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
         st.session_state["score_use_ai"] = True
     legacy_score_model = str(st.session_state.get("score_ai_model", DEFAULT_OPENAI_MODEL) or "")
     if "score_ai_provider" not in st.session_state:
-        st.session_state["score_ai_provider"] = "claude" if "claude" in legacy_score_model.lower() else "openai"
+        st.session_state["score_ai_provider"] = normalize_ai_provider(
+            st.session_state.get("global_ai_provider", "claude")
+        )
     if "score_openai_api_key" not in st.session_state:
         st.session_state["score_openai_api_key"] = st.session_state.get(
             "score_ai_api_key",
@@ -7549,21 +7544,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
 
     with st.expander("AI 티커 추론 설정 (선택)", expanded=False):
         st.checkbox("yfinance 검색 실패 시 AI로 티커 추론", key="score_use_ai")
-        st.selectbox(
-            "AI 제공자",
-            options=["openai", "claude"],
-            format_func=lambda x: ai_provider_label(x),
-            key="score_ai_provider",
-        )
-        st.text_input("OpenAI API Key", key="score_openai_api_key", type="password", placeholder="sk-...")
-        st.text_input("Claude API Key", key="score_claude_api_key", type="password", placeholder="sk-ant-...")
-        st.text_input("OpenAI 모델", key="score_openai_model")
-        st.text_input("Claude 모델", key="score_claude_model")
-        score_provider, _, score_model = get_ai_settings_from_session("score")
-        st.caption(
-            f"현재 선택: {ai_provider_label(score_provider)} / 모델 {score_model}. "
-            "기본은 웹검색→yfinance→SEC(해외)→Alpha/Finnhub 순, 필요 시 AI 추론을 추가로 시도합니다."
-        )
+        st.caption("AI 키/모델/제공자는 API 설정 탭의 공통값을 사용합니다.")
 
     top_col1, top_col2, top_col3, top_col4 = st.columns([1, 1.2, 1.1, 1.2])
     with top_col1:
@@ -8016,7 +7997,9 @@ def render_company_compare_tab(current_df: pd.DataFrame) -> None:
     if "compare_use_ai_ticker" not in st.session_state:
         st.session_state["compare_use_ai_ticker"] = False
     if "compare_ai_provider" not in st.session_state:
-        st.session_state["compare_ai_provider"] = st.session_state.get("score_ai_provider", "openai")
+        st.session_state["compare_ai_provider"] = normalize_ai_provider(
+            st.session_state.get("global_ai_provider", "claude")
+        )
     if "compare_openai_api_key" not in st.session_state:
         st.session_state["compare_openai_api_key"] = st.session_state.get(
             "score_openai_api_key",
@@ -8074,7 +8057,7 @@ def render_company_compare_tab(current_df: pd.DataFrame) -> None:
     st.session_state["compare_ai_provider"] = _coerce_choice(
         st.session_state.get("compare_ai_provider"),
         {"openai", "claude"},
-        "openai",
+        "claude",
     )
     st.session_state["compare_custom_weights"] = _to_bool_flag(st.session_state.get("compare_custom_weights", False))
     st.session_state["compare_use_ai_ticker"] = _to_bool_flag(st.session_state.get("compare_use_ai_ticker", False))
@@ -8264,18 +8247,7 @@ def render_company_compare_tab(current_df: pd.DataFrame) -> None:
 
     with st.expander("AI 티커 추론 설정 (선택)", expanded=False):
         st.checkbox("티커 자동 탐색 실패 시 AI 티커 추론 사용", key="compare_use_ai_ticker")
-        st.selectbox(
-            "AI 제공자",
-            options=["openai", "claude"],
-            format_func=lambda x: ai_provider_label(x),
-            key="compare_ai_provider",
-        )
-        st.text_input("OpenAI API Key", key="compare_openai_api_key", type="password", placeholder="sk-...")
-        st.text_input("Claude API Key", key="compare_claude_api_key", type="password", placeholder="sk-ant-...")
-        st.text_input("OpenAI 모델", key="compare_openai_model")
-        st.text_input("Claude 모델", key="compare_claude_model")
-        comp_provider, _, comp_model = get_ai_settings_from_session("compare")
-        st.caption(f"현재 선택: {ai_provider_label(comp_provider)} / 모델 {comp_model}")
+        st.caption("AI 키/모델/제공자는 API 설정 탭의 공통값을 사용합니다.")
 
     compute_btn = st.button("선택 지표로 기업 점수 계산", type="primary", key="compare_compute_btn")
     if compute_btn:
@@ -8585,7 +8557,7 @@ def render_api_settings_tab() -> None:
         save_app_settings(
             {
                 "store_sensitive_keys": "true" if persist_sensitive else "false",
-                "ai_provider": normalize_ai_provider(st.session_state.get("global_ai_provider", "openai")),
+                "ai_provider": normalize_ai_provider(st.session_state.get("global_ai_provider", "claude")),
                 "openai_api_key": st.session_state.get("global_openai_api_key", "") if persist_sensitive else "",
                 "claude_api_key": st.session_state.get("global_claude_api_key", "") if persist_sensitive else "",
                 "alpha_vantage_api_key": st.session_state.get("global_alpha_vantage_api_key", "") if persist_sensitive else "",
