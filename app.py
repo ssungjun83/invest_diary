@@ -3557,6 +3557,11 @@ def _coerce_string_list(value) -> list[str]:
     return items
 
 
+def _coerce_choice(value, allowed: set[str], default: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else default
+
+
 def _read_first_secret_or_env(keys: list[str]) -> str:
     for key in keys:
         value = ""
@@ -5321,6 +5326,24 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     ]:
         if key not in st.session_state:
             st.session_state[key] = ""
+
+    # 위젯 상태가 배열/객체로 오염되면 레이아웃 겹침이 발생할 수 있어 렌더 전에 정규화한다.
+    st.session_state["analysis_ai_provider"] = _coerce_choice(
+        st.session_state.get("analysis_ai_provider"),
+        {"openai", "claude"},
+        "openai",
+    )
+    st.session_state["analysis_use_ai_ticker"] = _to_bool_flag(st.session_state.get("analysis_use_ai_ticker", False))
+    for key in [
+        "analysis_openai_api_key",
+        "analysis_claude_api_key",
+        "analysis_openai_model",
+        "analysis_claude_model",
+        "analysis_company_name_input",
+        "analysis_ticker_input",
+        "analysis_ticker_source",
+    ]:
+        st.session_state[key] = str(st.session_state.get(key, "") or "").strip()
 
     st.markdown("#### 기업 리스트 관리")
     if "analysis_new_company_name" not in st.session_state:
