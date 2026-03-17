@@ -112,6 +112,8 @@ DEFAULT_TICKER_HINTS = {
     "HD건설기계": "267270.KS",
     "넥스틸": "092790.KS",
     "휴스틸": "005010.KS",
+    "TIME 코리아밸류업액티브": "495060.KS",
+    "노브": "NOV",
 }
 
 AI_PROVIDER_OPTIONS = ["OpenAI", "Claude"]
@@ -243,10 +245,45 @@ def _looks_explicit_foreign_company_name(name: str) -> bool:
     return False
 
 
+def _looks_domestic_company_name_hint(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text:
+        return False
+    builtin = get_builtin_ticker_hint(text)
+    if builtin.endswith(".KS") or builtin.endswith(".KQ"):
+        return True
+    upper = text.upper()
+    domestic_tokens = [
+        "코리아",
+        "코스피",
+        "코스닥",
+        "KOSPI",
+        "KOSDAQ",
+        "KRX",
+        "ETF",
+        "액티브",
+        "인버스",
+        "레버리지",
+        "KODEX",
+        "TIGER",
+        "KOACT",
+        "PLUS",
+        "ACE",
+        "ARIRANG",
+        "SOL",
+        "HANARO",
+        "RISE",
+    ]
+    return any(tok in upper for tok in domestic_tokens)
+
+
 def _is_non_kr_ticker_plausible_for_name(company_name: str, ticker: str) -> bool:
     tkr = clean_valid_ticker(ticker)
     if not tkr:
         return False
+    builtin = get_builtin_ticker_hint(company_name)
+    if builtin and tkr == builtin:
+        return True
     if tkr.endswith(".KS") or tkr.endswith(".KQ"):
         return True
     name = str(company_name or "").strip()
@@ -5952,7 +5989,9 @@ def infer_market_preference_from_row(stock_name: str, currency: str = "", ticker
     if _company_name_has_hangul(name):
         if _looks_explicit_foreign_company_name(name):
             return "foreign"
-        return "domestic"
+        if _looks_domestic_company_name_hint(name):
+            return "domestic"
+        return ""
     if tkr:
         return "foreign"
     if re.search(r"[A-Z]{2,}", upper_name):
@@ -7610,15 +7649,16 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             next_ticker = current_ticker
             next_sector = current_sector
             market_pref = market_pref_map.get(company_name, "")
-            if _company_name_has_hangul(company_name) and not _looks_explicit_foreign_company_name(company_name):
+            if _company_name_has_hangul(company_name) and _looks_domestic_company_name_hint(company_name):
                 market_pref = "domestic"
             builtin_hint = get_builtin_ticker_hint(company_name)
             if builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ"):
                 market_pref = "domestic"
             if not market_pref:
                 if row_ticker:
-                    market_pref = "domestic" if (row_ticker.endswith(".KS") or row_ticker.endswith(".KQ")) else "foreign"
-                elif _company_name_has_hangul(company_name) and not _looks_explicit_foreign_company_name(company_name):
+                    if not force_refresh:
+                        market_pref = "domestic" if (row_ticker.endswith(".KS") or row_ticker.endswith(".KQ")) else "foreign"
+                elif _company_name_has_hangul(company_name) and _looks_domestic_company_name_hint(company_name):
                     market_pref = "domestic"
 
             if (not force_refresh) and current_ticker:
