@@ -3534,6 +3534,29 @@ def _to_bool_flag(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
 
+def _coerce_string_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+
+    if isinstance(value, dict):
+        return []
+
+    items = []
+    try:
+        for v in value:
+            text = str(v or "").strip()
+            if text:
+                items.append(text)
+    except Exception:
+        text = str(value or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
 def _read_first_secret_or_env(keys: list[str]) -> str:
     for key in keys:
         value = ""
@@ -6704,8 +6727,8 @@ def render_company_compare_tab(current_df: pd.DataFrame) -> None:
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">기업분석</div>', unsafe_allow_html=True)
 
-    all_companies = get_all_stock_names(current_df)
-    holding_companies = get_holding_stock_names(current_df)
+    all_companies = _coerce_string_list(get_all_stock_names(current_df))
+    holding_companies = _coerce_string_list(get_holding_stock_names(current_df))
     company_list_df = load_company_list()
     if not all_companies:
         st.info("비교할 기업이 없습니다. 기업정보 탭에서 기업을 추가하거나 기록을 저장해 주세요.")
@@ -6729,8 +6752,12 @@ def render_company_compare_tab(current_df: pd.DataFrame) -> None:
 
     if "compare_companies" not in st.session_state:
         st.session_state["compare_companies"] = default_companies
+    else:
+        st.session_state["compare_companies"] = _coerce_string_list(st.session_state.get("compare_companies"))
     if "compare_metrics" not in st.session_state:
         st.session_state["compare_metrics"] = default_metric_keys
+    else:
+        st.session_state["compare_metrics"] = _coerce_string_list(st.session_state.get("compare_metrics"))
     if "compare_custom_weights" not in st.session_state:
         st.session_state["compare_custom_weights"] = False
     if "compare_use_ai_ticker" not in st.session_state:
@@ -6763,10 +6790,10 @@ def render_company_compare_tab(current_df: pd.DataFrame) -> None:
         st.session_state["compare_selected_set_name"] = "선택안함"
 
     if "compare_pending_companies" in st.session_state:
-        pending_companies = st.session_state.pop("compare_pending_companies") or []
+        pending_companies = _coerce_string_list(st.session_state.pop("compare_pending_companies"))
         st.session_state["compare_companies"] = [c for c in pending_companies if c in all_companies]
     if "compare_pending_metrics" in st.session_state:
-        pending_metrics = st.session_state.pop("compare_pending_metrics") or []
+        pending_metrics = _coerce_string_list(st.session_state.pop("compare_pending_metrics"))
         st.session_state["compare_metrics"] = [m for m in pending_metrics if m in SCORE_METRIC_CONFIG]
     if "compare_pending_custom_weights" in st.session_state:
         st.session_state["compare_custom_weights"] = bool(st.session_state.pop("compare_pending_custom_weights"))
