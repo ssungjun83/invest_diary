@@ -671,6 +671,9 @@ def get_conn() -> sqlite3.Connection:
             stock_name TEXT PRIMARY KEY,
             ticker TEXT,
             sector TEXT,
+            price_krw REAL,
+            price_source TEXT,
+            price_updated_at TEXT,
             source TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -680,6 +683,12 @@ def get_conn() -> sqlite3.Connection:
     company_list_columns = {row[1] for row in conn.execute("PRAGMA table_info(company_list)").fetchall()}
     if "sector" not in company_list_columns:
         conn.execute("ALTER TABLE company_list ADD COLUMN sector TEXT")
+    if "price_krw" not in company_list_columns:
+        conn.execute("ALTER TABLE company_list ADD COLUMN price_krw REAL")
+    if "price_source" not in company_list_columns:
+        conn.execute("ALTER TABLE company_list ADD COLUMN price_source TEXT")
+    if "price_updated_at" not in company_list_columns:
+        conn.execute("ALTER TABLE company_list ADD COLUMN price_updated_at TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS company_compare_sets (
@@ -2530,6 +2539,127 @@ def resolve_ticker_auto_with_retry(
     return ticker, source
 
 
+def _fetch_currency_to_krw_rate(currency: str, rate_date: date) -> tuple[float | None, str]:
+    curr = str(currency or "").strip().upper()
+    if not curr:
+        return None, "통화 정보 없음"
+    if curr == "KRW":
+        return 1.0, "KRW"
+    if curr == "USD":
+        rate, src = get_usd_krw_rate_for_date(rate_date)
+        return float(rate), f"USD/KRW:{src}"
+
+    fx_ticker_map = {
+        "EUR": "EURKRW=X",
+        "JPY": "JPYKRW=X",
+        "CNY": "CNYKRW=X",
+        "GBP": "GBPKRW=X",
+        "AUD": "AUDKRW=X",
+        "CAD": "CADKRW=X",
+        "CHF": "CHFKRW=X",
+    }
+    fx_ticker = fx_ticker_map.get(curr, "")
+    if not fx_ticker:
+        return None, f"지원되지 않는 통화: {curr}"
+
+    try:
+        import yfinance as yf
+    except Exception:
+        return None, "yfinance 미설치"
+
+    start = (rate_date - timedelta(days=10)).isoformat()
+    end = (rate_date + timedelta(days=1)).isoformat()
+    try:
+        hist = yf.download(fx_ticker, start=start, end=end, interval="1d", progress=False, auto_adjust=False)
+    except Exception as exc:
+        return None, f"{fx_ticker} 조회 실패: {exc}"
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return None, f"{fx_ticker} 환율 데이터 없음"
+
+    close = hist["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = close.dropna()
+    if close.empty:
+        return None, f"{fx_ticker} 종가 데이터 없음"
+
+    idx = pd.to_datetime(close.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_convert(None)
+    close.index = idx
+    close = close[close.index.date <= rate_date]
+    if close.empty:
+        return None, f"{fx_ticker} 해당일 이전 데이터 없음"
+
+    market_dt = close.index[-1].date().isoformat()
+    return float(close.iloc[-1]), f"{fx_ticker}:{market_dt}"
+
+
+def fetch_current_price_krw_from_ticker(ticker: str, rate_date: date | None = None) -> tuple[float | None, str]:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
+        return None, "티커 없음"
+    target_date = rate_date or date.today()
+
+    try:
+        import yfinance as yf
+    except Exception:
+        return None, "yfinance 미설치"
+
+    obj = yf.Ticker(tkr)
+    price_native = None
+    currency = ""
+    source_label = ""
+
+    try:
+        fast = obj.fast_info or {}
+    except Exception:
+        fast = {}
+
+    if isinstance(fast, dict):
+        for key in ["lastPrice", "regularMarketPrice", "previousClose", "last_price"]:
+            val = _safe_to_float(fast.get(key))
+            if val is not None and val > 0:
+                price_native = float(val)
+                source_label = f"yfinance.fast_info.{key}"
+                break
+        currency = str(fast.get("currency") or "").strip().upper()
+
+    if price_native is None:
+        try:
+            hist = obj.history(period="5d", interval="1d", auto_adjust=False)
+        except Exception:
+            hist = pd.DataFrame()
+        if hist is not None and not hist.empty and "Close" in hist.columns:
+            close = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+            if not close.empty:
+                price_native = float(close.iloc[-1])
+                source_label = "yfinance.history.close"
+
+    if not currency:
+        try:
+            info = obj.info or {}
+        except Exception:
+            info = {}
+        currency = str(info.get("currency") or "").strip().upper()
+
+    if not currency:
+        if tkr.endswith(".KS") or tkr.endswith(".KQ"):
+            currency = "KRW"
+        else:
+            currency = "USD"
+
+    if price_native is None or price_native <= 0:
+        return None, "현재 주가를 찾지 못했습니다."
+
+    fx_rate, fx_src = _fetch_currency_to_krw_rate(currency, target_date)
+    if fx_rate is None or fx_rate <= 0:
+        return None, f"환산 실패({currency}): {fx_src}"
+
+    price_krw = float(price_native) * float(fx_rate)
+    return price_krw, f"{source_label}/{currency}→KRW({fx_src})"
+
+
 def _safe_to_float(value) -> float | None:
     if value is None:
         return None
@@ -3897,7 +4027,7 @@ def load_company_list() -> pd.DataFrame:
     try:
         df = pd.read_sql_query(
             """
-            SELECT stock_name, ticker, sector, source, created_at, updated_at
+            SELECT stock_name, ticker, sector, price_krw, price_source, price_updated_at, source, created_at, updated_at
             FROM company_list
             ORDER BY stock_name
             """,
@@ -3942,29 +4072,107 @@ def get_company_list_sector(stock_name: str) -> str:
     return (row[0] or "").strip() if row and row[0] else ""
 
 
-def upsert_company_list_entry(stock_name: str, ticker: str = "", sector: str = "", source: str = "manual") -> None:
+def build_company_price_krw_maps(company_list_df: pd.DataFrame | None = None) -> tuple[dict[str, float], dict[str, float]]:
+    exact_map: dict[str, float] = {}
+    norm_last_price: dict[str, float] = {}
+    norm_count: dict[str, int] = {}
+
+    src_df = company_list_df if isinstance(company_list_df, pd.DataFrame) else load_company_list()
+    if src_df is None or src_df.empty:
+        return exact_map, {}
+
+    for _, row in src_df.iterrows():
+        stock_name = str(row.get("stock_name") or "").strip()
+        if not stock_name:
+            continue
+        price_val = _safe_to_float(row.get("price_krw"))
+        if price_val is None or price_val <= 0:
+            continue
+        price = float(price_val)
+        exact_map[stock_name] = price
+        norm_name = normalize_company_name_for_match(stock_name)
+        if norm_name:
+            norm_last_price[norm_name] = price
+            norm_count[norm_name] = int(norm_count.get(norm_name, 0)) + 1
+
+    norm_unique_map = {k: v for k, v in norm_last_price.items() if int(norm_count.get(k, 0)) == 1}
+    return exact_map, norm_unique_map
+
+
+def lookup_company_price_krw(stock_name: str, exact_map: dict[str, float], norm_map: dict[str, float]) -> float | None:
+    name = str(stock_name or "").strip()
+    if not name:
+        return None
+    exact = _safe_to_float(exact_map.get(name))
+    if exact is not None and exact > 0:
+        return float(exact)
+
+    norm_name = normalize_company_name_for_match(name)
+    if not norm_name:
+        return None
+    norm_price = _safe_to_float(norm_map.get(norm_name))
+    if norm_price is None or norm_price <= 0:
+        return None
+    return float(norm_price)
+
+
+def build_price_series_with_company_fallback(
+    names: pd.Series,
+    qty: pd.Series,
+    value_krw: pd.Series,
+    company_price_exact: dict[str, float],
+    company_price_norm: dict[str, float],
+) -> pd.Series:
+    qty_num = pd.to_numeric(qty, errors="coerce")
+    value_num = pd.to_numeric(value_krw, errors="coerce")
+    calc_series = value_num / qty_num.replace(0, pd.NA)
+    mapped_series = names.astype(str).apply(
+        lambda nm: lookup_company_price_krw(nm, company_price_exact, company_price_norm)
+    )
+    mapped_series = pd.to_numeric(mapped_series, errors="coerce")
+    merged = mapped_series.where(mapped_series > 0, calc_series)
+    return merged.fillna(0.0)
+
+
+def upsert_company_list_entry(
+    stock_name: str,
+    ticker: str = "",
+    sector: str = "",
+    source: str | None = "manual",
+    price_krw: float | None = None,
+    price_source: str | None = None,
+) -> None:
     name = (stock_name or "").strip()
     if not name:
         return
 
     tkr = clean_valid_ticker(ticker)
     sec = (sector or "").strip()
+    price_val = _safe_to_float(price_krw)
+    if price_val is not None and price_val <= 0:
+        price_val = None
+    p_source = (price_source or "").strip()
+    source_text = None if source is None else str(source).strip()
     now_str = datetime.now().isoformat(timespec="seconds")
 
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT ticker, sector FROM company_list WHERE stock_name = ?",
+            "SELECT ticker, sector, price_krw, price_source FROM company_list WHERE stock_name = ?",
             (name,),
         ).fetchone()
         existing_ticker = clean_valid_ticker((row[0] or "").strip().upper()) if row and row[0] else ""
         existing_sector = (row[1] or "").strip() if row and len(row) > 1 and row[1] else ""
+        existing_price = _safe_to_float(row[2]) if row and len(row) > 2 else None
+        existing_price_source = (row[3] or "").strip() if row and len(row) > 3 and row[3] else ""
         next_ticker = tkr or existing_ticker
         next_sector = sec or existing_sector
+        next_price = price_val if price_val is not None else existing_price
+        next_price_source = p_source or existing_price_source
         conn.execute(
             """
-            INSERT INTO company_list (stock_name, ticker, sector, source, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO company_list (stock_name, ticker, sector, price_krw, price_source, price_updated_at, source, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(stock_name) DO UPDATE SET
                 ticker = CASE
                     WHEN excluded.ticker IS NULL OR excluded.ticker = '' THEN company_list.ticker
@@ -3974,13 +4182,35 @@ def upsert_company_list_entry(stock_name: str, ticker: str = "", sector: str = "
                     WHEN excluded.sector IS NULL OR excluded.sector = '' THEN company_list.sector
                     ELSE excluded.sector
                 END,
+                price_krw = CASE
+                    WHEN excluded.price_krw IS NULL OR excluded.price_krw <= 0 THEN company_list.price_krw
+                    ELSE excluded.price_krw
+                END,
+                price_source = CASE
+                    WHEN excluded.price_source IS NULL OR excluded.price_source = '' THEN company_list.price_source
+                    ELSE excluded.price_source
+                END,
+                price_updated_at = CASE
+                    WHEN excluded.price_krw IS NULL OR excluded.price_krw <= 0 THEN company_list.price_updated_at
+                    ELSE excluded.price_updated_at
+                END,
                 source = CASE
                     WHEN excluded.source IS NULL OR excluded.source = '' THEN company_list.source
                     ELSE excluded.source
                 END,
                 updated_at = excluded.updated_at
             """,
-            (name, next_ticker or None, next_sector or None, source or "manual", now_str, now_str),
+            (
+                name,
+                next_ticker or None,
+                next_sector or None,
+                float(next_price) if next_price is not None else None,
+                next_price_source or None,
+                now_str if next_price is not None else None,
+                source_text if source_text is not None else None,
+                now_str,
+                now_str,
+            ),
         )
         conn.commit()
     finally:
@@ -5474,6 +5704,8 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         ensure_portfolio_columns(source_df, usd_krw_rate, force_usd_rate=True),
         usd_krw_rate,
     )
+    company_list_df = load_company_list()
+    company_price_exact, company_price_norm = build_company_price_krw_maps(company_list_df)
 
     total_value, total_pnl, total_principal, total_return = compute_totals(cleaned_df, usd_krw_rate, selected_date)
     cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(selected_date, None)
@@ -5487,12 +5719,13 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         st.markdown("#### 국내/해외 보유 리스트 한눈에 보기")
         market_view_df = build_holdings_market_view(cleaned_df, usd_krw_rate)
         market_view_df["투자금액(원)"] = market_view_df[COL_VALUE_KRW] - market_view_df[COL_PNL_KRW]
-        market_qty = pd.to_numeric(market_view_df[COL_QTY], errors="coerce")
-        market_view_df[COL_PRICE_KRW] = (
-            pd.to_numeric(market_view_df[COL_VALUE_KRW], errors="coerce")
-            / market_qty.replace(0, pd.NA)
+        market_view_df[COL_PRICE_KRW] = build_price_series_with_company_fallback(
+            names=market_view_df[COL_NAME],
+            qty=market_view_df[COL_QTY],
+            value_krw=market_view_df[COL_VALUE_KRW],
+            company_price_exact=company_price_exact,
+            company_price_norm=company_price_norm,
         )
-        market_view_df[COL_PRICE_KRW] = market_view_df[COL_PRICE_KRW].fillna(0.0)
         group_summary = (
             market_view_df.groupby("시장구분", as_index=False)
             .agg(
@@ -5761,12 +5994,13 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     st.markdown("#### 수동 입력 테이블")
     prepared_df = ensure_portfolio_columns(cleaned_df, usd_krw_rate, force_usd_rate=True)
     prepared_view = to_krw_view(prepared_df, usd_krw_rate, force_usd_rate=True)
-    prepared_qty = pd.to_numeric(prepared_df[COL_QTY], errors="coerce")
-    prepared_df[COL_PRICE_KRW] = (
-        pd.to_numeric(prepared_view[COL_VALUE_KRW], errors="coerce")
-        / prepared_qty.replace(0, pd.NA)
+    prepared_df[COL_PRICE_KRW] = build_price_series_with_company_fallback(
+        names=prepared_df[COL_NAME],
+        qty=prepared_df[COL_QTY],
+        value_krw=prepared_view[COL_VALUE_KRW],
+        company_price_exact=company_price_exact,
+        company_price_norm=company_price_norm,
     )
-    prepared_df[COL_PRICE_KRW] = prepared_df[COL_PRICE_KRW].fillna(0.0)
     table_df = st.data_editor(
         prepared_df,
         num_rows="dynamic",
@@ -6150,14 +6384,18 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     listed_set = set(listed_names)
     ticker_map = {}
     sector_map = {}
+    price_map = {}
     source_map = {}
     if not company_list_df.empty:
         for _, row in company_list_df.iterrows():
             nm = str(row.get("stock_name") or "").strip()
             if not nm:
                 continue
-            ticker_map[nm] = get_company_list_ticker(nm)
+            ticker_map[nm] = clean_valid_ticker(str(row.get("ticker") or ""))
             sector_map[nm] = str(row.get("sector") or "").strip()
+            price_val = _safe_to_float(row.get("price_krw"))
+            if price_val is not None and price_val > 0:
+                price_map[nm] = float(price_val)
             source_map[nm] = str(row.get("source") or "").strip() or "manual"
     overview_rows = []
     for nm in sorted(holding_set | listed_set):
@@ -6171,14 +6409,23 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 "기업명": nm,
                 "티커": ticker_map.get(nm, ""),
                 "산업섹터": sector_map.get(nm, ""),
+                "현재주가(원화)": price_map.get(nm),
                 "구분": ", ".join(tags),
                 "리스트소스": source_map.get(nm, ""),
             }
         )
-    auto_fill_missing_btn = st.button(
-        "빈 티커/산업섹터 일괄 채우기 (API+AI)",
-        key="analysis_fill_missing_company_meta_btn",
-    )
+    meta_btn_col1, meta_btn_col2 = st.columns([1.2, 1.2])
+    with meta_btn_col1:
+        auto_fill_missing_btn = st.button(
+            "빈 티커/산업섹터 일괄 채우기 (API+AI)",
+            key="analysis_fill_missing_company_meta_btn",
+        )
+    with meta_btn_col2:
+        refresh_price_btn = st.button(
+            "현재 주가 일괄 불러오기 (API+AI)",
+            key="analysis_fill_company_price_btn",
+        )
+
     if auto_fill_missing_btn:
         ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
         targets = [row for row in overview_rows if not str(row.get("티커") or "").strip() or not str(row.get("산업섹터") or "").strip()]
@@ -6266,14 +6513,74 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 st.session_state["analysis_bulk_fill_warning"] = f"일부 항목은 여전히 빈 값입니다: {preview}{tail}"
             st.rerun()
 
+    if refresh_price_btn:
+        ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+        targets = [row for row in overview_rows if str(row.get("기업명") or "").strip()]
+        if not targets:
+            st.info("주가를 갱신할 기업이 없습니다.")
+        else:
+            updated_count = 0
+            failed_details: list[str] = []
+            with st.spinner("기업 리스트 현재 주가를 일괄 불러오는 중입니다..."):
+                for row in targets:
+                    company_name = str(row.get("기업명") or "").strip()
+                    current_ticker = clean_valid_ticker(str(row.get("티커") or ""))
+                    if not company_name:
+                        continue
+
+                    ticker = current_ticker
+                    if not ticker:
+                        ticker, _ = resolve_ticker_auto_with_retry(
+                            company_name,
+                            use_ai=bool(ai_api_key),
+                            api_key=ai_api_key,
+                            model=ai_model,
+                            provider=ai_provider,
+                            market_preference=market_pref_map.get(company_name, ""),
+                        )
+                    if not ticker:
+                        failed_details.append(f"{company_name}(티커 없음)")
+                        continue
+
+                    price_krw, price_src = fetch_current_price_krw_from_ticker(ticker, date.today())
+                    if price_krw is None or float(price_krw) <= 0:
+                        fail_reason = (price_src or "주가 조회 실패").strip()
+                        failed_details.append(f"{company_name}({fail_reason})")
+                        continue
+
+                    upsert_company_list_entry(
+                        company_name,
+                        ticker=ticker,
+                        source=None,
+                        price_krw=float(price_krw),
+                        price_source=price_src or "api",
+                    )
+                    updated_count += 1
+
+            if updated_count > 0:
+                st.session_state["analysis_bulk_price_notice"] = f"현재 주가 업데이트 완료: {updated_count}개"
+            else:
+                st.session_state["analysis_bulk_price_notice"] = "현재 주가를 새로 업데이트하지 못했습니다."
+            if failed_details:
+                preview = ", ".join(failed_details[:5])
+                remain = len(failed_details) - min(5, len(failed_details))
+                tail = f" 외 {remain}개" if remain > 0 else ""
+                st.session_state["analysis_bulk_price_warning"] = f"일부 실패: {preview}{tail}"
+            st.rerun()
+
     if "analysis_bulk_fill_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_bulk_fill_notice"))
     if "analysis_bulk_fill_warning" in st.session_state:
         st.warning(st.session_state.pop("analysis_bulk_fill_warning"))
+    if "analysis_bulk_price_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_bulk_price_notice"))
+    if "analysis_bulk_price_warning" in st.session_state:
+        st.warning(st.session_state.pop("analysis_bulk_price_warning"))
 
     if overview_rows:
         st.caption("목록에서 기업 행을 클릭하면 아래 기업명/티커 입력이 자동 선택됩니다.")
         overview_df = pd.DataFrame(overview_rows)
+        overview_df["현재주가(원화)"] = pd.to_numeric(overview_df["현재주가(원화)"], errors="coerce")
         current_input_name = (st.session_state.get("analysis_company_name_input") or "").strip()
         current_input_ticker = clean_valid_ticker(st.session_state.get("analysis_ticker_input") or "")
         selected_rows = []
@@ -6282,6 +6589,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 overview_df,
                 use_container_width=True,
                 hide_index=True,
+                column_config={
+                    "현재주가(원화)": st.column_config.NumberColumn("현재주가(원화)", format="localized")
+                },
                 on_select="rerun",
                 selection_mode="single-row",
                 key="analysis_company_overview_table",
