@@ -7,7 +7,9 @@ from difflib import SequenceMatcher
 import os
 import hashlib
 import hmac
+import html
 from io import BytesIO
+from urllib.parse import unquote
 
 import pandas as pd
 import plotly.express as px
@@ -1748,6 +1750,155 @@ def get_saved_ticker_hint(company_name: str) -> str:
     return clean_valid_ticker(raw)
 
 
+def _extract_ticker_candidates_from_web_text(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    decoded = unquote(unquote(raw))
+    corpus = f"{raw}\n{decoded}"
+    candidates = []
+
+    # 야후 검색 결과 제목(h3)에서 티커를 우선 추출한다.
+    for m in re.finditer(r"<h3[^>]*>(.*?)</h3>", corpus, re.I | re.S):
+        title_html = m.group(1) or ""
+        title = re.sub(r"<.*?>", " ", title_html)
+        title = html.unescape(title)
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title:
+            continue
+
+        title_patterns = [
+            r"\(([A-Za-z0-9.\-^=]{1,24})\)\s*(?:Stock|주가|Quote|개요)",
+            r"\b([A-Za-z0-9.\-^=]{1,24})\s*-\s*\([^)]*?(?:NYSE|NASDAQ|AMEX|KOSPI|KOSDAQ)",
+        ]
+        for pat in title_patterns:
+            for hit in re.finditer(pat, title, re.I):
+                cand = clean_valid_ticker(hit.group(1))
+                if cand:
+                    candidates.append(cand)
+
+    # 링크 안에 finance.yahoo.com/quote/{TICKER}가 있으면 추출한다.
+    for m in re.finditer(r"finance\.yahoo\.com/quote/([A-Za-z0-9.\-^=]{1,24})", corpus, re.I):
+        cand = clean_valid_ticker(m.group(1))
+        if cand:
+            candidates.append(cand)
+
+    # 일반적인 시장 접두 패턴도 보조로 수집한다.
+    for m in re.finditer(r"(?:NASDAQ|NYSE|AMEX|OTC|KOSPI|KOSDAQ)\s*[:\-]\s*([A-Za-z0-9.\-^=]{1,24})", corpus, re.I):
+        cand = clean_valid_ticker(m.group(1))
+        if cand:
+            candidates.append(cand)
+
+    # 최후 보조: "ticker/symbol" 컨텍스트 근처
+    for m in re.finditer(r"(?:stock symbol|ticker)\s*[:\-]?\s*([A-Za-z0-9.\-^=]{1,24})", corpus, re.I):
+        cand = clean_valid_ticker(m.group(1))
+        if cand:
+            candidates.append(cand)
+
+    # RU=... redirect 안에 숨어있는 실제 URL도 한 번 더 펼쳐본다.
+    for m in re.finditer(r"/RU=([^/]+)/", raw):
+        ru = unquote(unquote(m.group(1)))
+        for hit in re.finditer(r"finance\.yahoo\.com/quote/([A-Za-z0-9.\-^=]{1,24})", ru, re.I):
+            cand = clean_valid_ticker(hit.group(1))
+            if cand:
+                candidates.append(cand)
+
+    blocked = {
+        "YAHOO",
+        "SYMBOL",
+        "PRICE",
+        "TODAY",
+        "LIVE",
+        "TAPE",
+        "FOR",
+        "CODE",
+        "USD",
+        "KRW",
+        "JPY",
+        "EUR",
+        "CNY",
+        "GBP",
+        "ETF",
+        "ADR",
+        "NYSE",
+        "NASDAQ",
+        "AMEX",
+        "OTC",
+        "KOSPI",
+        "KOSDAQ",
+    }
+    cleaned = []
+    seen = set()
+    for cand in candidates:
+        cand = clean_valid_ticker(cand)
+        if not cand:
+            continue
+        if cand in blocked:
+            continue
+        if cand in seen:
+            continue
+        seen.add(cand)
+        cleaned.append(cand)
+    return cleaned
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _web_search_ticker_candidates(company_name: str) -> tuple[list[dict], str]:
+    name = (company_name or "").strip()
+    if not name:
+        return [], "기업명이 비어 있습니다."
+
+    queries = [
+        f"{name} ticker",
+        f"{name} stock ticker",
+        f"{name} 주식 티커",
+    ]
+    score_map: dict[str, float] = {}
+    info_map: dict[str, dict] = {}
+    errs = []
+
+    for q_idx, q in enumerate(queries):
+        try:
+            resp = requests.get(
+                "https://search.yahoo.com/search",
+                params={"p": q},
+                headers=HTTP_HEADERS_COMMON,
+                timeout=12,
+            )
+            resp.raise_for_status()
+            body = resp.text or ""
+            hits = _extract_ticker_candidates_from_web_text(body)
+            for rank, ticker in enumerate(hits):
+                score = 6.0 - q_idx - (rank * 0.18)
+                if ticker not in score_map or score > score_map[ticker]:
+                    score_map[ticker] = score
+                    info_map[ticker] = {
+                        "symbol": ticker,
+                        "name": name,
+                        "exchange": "WEB",
+                        "region": "",
+                    }
+        except Exception as exc:
+            errs.append(str(exc))
+
+    if not score_map:
+        err_text = " / ".join(errs[:2]) if errs else "웹 검색 결과가 없습니다."
+        return [], err_text
+
+    ordered = sorted(score_map.keys(), key=lambda t: score_map[t], reverse=True)
+    return [info_map[t] for t in ordered], ""
+
+
+def search_ticker_web_first(company_name: str, market_preference: str = "") -> tuple[str, str]:
+    name = (company_name or "").strip()
+    if not name:
+        return "", "기업명이 비어 있습니다."
+    candidates, err = _web_search_ticker_candidates(name)
+    if not candidates:
+        return "", f"웹 검색 실패: {err}"
+    return choose_best_ticker_candidate(name, candidates, "웹검색", market_preference=market_preference)
+
+
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def _fetch_yahoo_search_quotes_cached(company_name: str) -> tuple[list[dict], str]:
     name = (company_name or "").strip()
@@ -2289,6 +2440,10 @@ def resolve_ticker_auto(
     if builtin and _ticker_matches_market_preference(builtin, pref):
         return builtin, "내장 힌트"
 
+    web_ticker, web_source = search_ticker_web_first(name, market_preference=market_preference)
+    if web_ticker and _ticker_matches_market_preference(web_ticker, pref):
+        return web_ticker, web_source
+
     saved = clean_valid_ticker(get_saved_ticker_hint(name))
     if saved and _ticker_matches_market_preference(saved, pref):
         return saved, "기존 저장 이력"
@@ -2333,7 +2488,7 @@ def resolve_ticker_auto(
             return ai_ticker, f"{ai_source} (자동 보조)"
         ai_source_msg = ai_source or "AI 시장선호 조건 불일치"
 
-    fallback_msgs = [msg for msg in [ai_source_msg, yf_source, sec_source, alpha_source, fin_source] if msg]
+    fallback_msgs = [msg for msg in [ai_source_msg, web_source, yf_source, sec_source, alpha_source, fin_source] if msg]
     return "", " | ".join(fallback_msgs) if fallback_msgs else "티커 자동 탐색에 실패했습니다."
 
 
@@ -5775,7 +5930,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         "analysis_ticker_input",
         "analysis_ticker_source",
     ]:
-        st.session_state[key] = str(st.session_state.get(key, "") or "").strip()
+        st.session_state[key] = _sanitize_widget_text(st.session_state.get(key), "")
+    st.session_state["analysis_company_hint"] = _sanitize_widget_text(
+        st.session_state.get("analysis_company_hint"),
+        "직접입력",
+    )
 
     st.markdown("#### 기업 리스트 관리")
     if "analysis_new_company_name" not in st.session_state:
@@ -6125,7 +6284,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     st.session_state["analysis_company_hint"] = "직접입력"
                     st.rerun()
 
-    with st.expander("AI 설정 (자동 생성/티커 추론)", expanded=False):
+    st.markdown("##### AI 설정 (자동 생성/티커 추론)")
+    ai_cfg_col1, ai_cfg_col2 = st.columns([1, 1])
+    with ai_cfg_col1:
         st.checkbox("yfinance 티커 검색 실패 시 AI 티커 추론 사용", key="analysis_use_ai_ticker")
         st.selectbox(
             "AI 제공자",
@@ -6135,12 +6296,13 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         )
         st.text_input("OpenAI API Key", key="analysis_openai_api_key", type="password", placeholder="sk-...")
         st.text_input("Claude API Key", key="analysis_claude_api_key", type="password", placeholder="sk-ant-...")
+    with ai_cfg_col2:
         st.text_input("OpenAI 모델", key="analysis_openai_model")
         st.text_input("Claude 모델", key="analysis_claude_model")
         selected_provider, _, selected_model = get_ai_settings_from_session("analysis")
         st.caption(
             f"현재 선택: {ai_provider_label(selected_provider)} / 모델 {selected_model}. "
-            "티커는 yfinance→SEC(해외)→Alpha/Finnhub→AI 순으로 보강 탐색합니다."
+            "티커는 웹검색→yfinance→SEC(해외)→Alpha/Finnhub→AI 순으로 보강 탐색합니다."
         )
 
     c1, c2, c3, c4 = st.columns([1, 1.3, 1.1, 1.2])
@@ -6174,25 +6336,42 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     company_name = analysis_company_name_value
     if company_name and (company_name != st.session_state.get("analysis_prev_company") or not analysis_ticker_value):
         list_ticker = get_company_list_ticker(company_name)
-        if list_ticker:
-            if list_ticker != analysis_ticker_value:
-                st.session_state["analysis_ticker_pending"] = list_ticker
-                st.session_state["analysis_ticker_autofill_notice"] = f"티커 자동 입력: {list_ticker} (기업 리스트 저장값)"
-            st.session_state["analysis_ticker_source"] = "기업 리스트 저장값"
-        else:
+        market_pref = market_pref_map.get(company_name, "")
+        list_is_kr = bool(list_ticker.endswith(".KS") or list_ticker.endswith(".KQ"))
+        q_norm = normalize_company_name_for_match(company_name)
+        short_hangul_name = bool(re.search(r"[가-힣]", company_name)) and len(q_norm) <= 4
+        need_recheck = (not list_ticker) or (
+            short_hangul_name and list_is_kr and _market_pref_normalized(market_pref) != "domestic"
+        )
+
+        chosen_ticker = list_ticker
+        chosen_source = "기업 리스트 저장값" if list_ticker else ""
+        if need_recheck:
             tkr, src = resolve_ticker_auto_with_retry(
                 company_name,
                 use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
                 api_key=analysis_ai_api_key,
                 model=analysis_ai_model,
                 provider=analysis_ai_provider,
-                market_preference=market_pref_map.get(company_name, ""),
+                market_preference=market_pref,
             )
-            if tkr and (not analysis_ticker_value or selected != "직접입력"):
-                if tkr != analysis_ticker_value:
-                    st.session_state["analysis_ticker_pending"] = tkr
-                    st.session_state["analysis_ticker_autofill_notice"] = f"티커 자동 입력: {tkr} ({src})"
-                st.session_state["analysis_ticker_source"] = src
+            tkr_is_kr = bool(tkr.endswith(".KS") or tkr.endswith(".KQ")) if tkr else False
+            prefer_auto = bool(tkr) and (
+                not list_ticker
+                or (list_is_kr and not tkr_is_kr)
+                or str(src or "").startswith("웹검색")
+            )
+            if prefer_auto:
+                chosen_ticker = tkr
+                chosen_source = src
+
+        if chosen_ticker:
+            if chosen_ticker != analysis_ticker_value:
+                st.session_state["analysis_ticker_pending"] = chosen_ticker
+                st.session_state["analysis_ticker_autofill_notice"] = (
+                    f"티커 자동 입력: {chosen_ticker} ({chosen_source or '자동 탐색'})"
+                )
+            st.session_state["analysis_ticker_source"] = chosen_source or "자동 탐색"
         st.session_state["analysis_prev_company"] = company_name
 
         latest_df = analysis_all[analysis_all["stock_name"] == company_name] if not analysis_all.empty else pd.DataFrame()
@@ -6891,7 +7070,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
         score_provider, _, score_model = get_ai_settings_from_session("score")
         st.caption(
             f"현재 선택: {ai_provider_label(score_provider)} / 모델 {score_model}. "
-            "기본은 yfinance→SEC(해외)→Alpha/Finnhub 순, 필요 시 AI 추론을 추가로 시도합니다."
+            "기본은 웹검색→yfinance→SEC(해외)→Alpha/Finnhub 순, 필요 시 AI 추론을 추가로 시도합니다."
         )
 
     top_col1, top_col2, top_col3, top_col4 = st.columns([1, 1.2, 1.1, 1.2])
