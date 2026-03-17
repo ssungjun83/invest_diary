@@ -3613,6 +3613,226 @@ def _extract_json_from_text(text: str) -> dict | None:
         return None
 
 
+def _is_missing_summary_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) == 0
+    return False
+
+
+def _merge_financial_summary_dicts(base: dict, incoming: dict) -> tuple[dict, bool]:
+    merged = dict(base or {})
+    changed = False
+    for key, val in (incoming or {}).items():
+        if key not in merged or _is_missing_summary_value(merged.get(key)):
+            if not _is_missing_summary_value(val):
+                merged[key] = val
+                changed = True
+    return merged, changed
+
+
+def _extract_domestic_code_from_ticker(ticker: str) -> str:
+    tkr = clean_valid_ticker(ticker)
+    if re.fullmatch(r"\d{6}\.(KS|KQ)", tkr):
+        return tkr.split(".")[0]
+    if re.fullmatch(r"\d{6}", tkr):
+        return tkr
+    return ""
+
+
+def _parse_number_with_short_unit(value_text: str) -> float | None:
+    text = str(value_text or "").strip().replace(",", "")
+    if not text:
+        return None
+    m = re.search(r"([+\-]?\d+(?:\.\d+)?)\s*([TMBK]?)", text, re.I)
+    if not m:
+        return _safe_to_float(text)
+    num = _safe_to_float(m.group(1))
+    unit = (m.group(2) or "").upper()
+    if num is None:
+        return None
+    factor_map = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+    return float(num) * float(factor_map.get(unit, 1.0))
+
+
+def _extract_google_finance_metric_value(page_html: str, label: str) -> str:
+    if not page_html:
+        return ""
+    pattern = rf">{re.escape(label)}</div>.*?<div class=\"P6K39c\">(.*?)</div>"
+    m = re.search(pattern, page_html, re.I | re.S)
+    if not m:
+        return ""
+    raw = re.sub(r"<.*?>", " ", m.group(1) or "")
+    raw = html.unescape(raw)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _google_quote_symbol_candidates(ticker: str) -> list[str]:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
+        return []
+    code = _extract_domestic_code_from_ticker(tkr)
+    if code:
+        return [f"{code}:KRX"]
+
+    if "." in tkr:
+        # 국제 접미사가 있는 티커는 점을 하이픈으로 바꾼 후보도 함께 시도.
+        no_dot = tkr.replace(".", "-")
+        return [tkr, no_dot]
+    return [f"{tkr}:NASDAQ", f"{tkr}:NYSE", f"{tkr}:AMEX", tkr]
+
+
+def fetch_company_financial_summary_from_naver(ticker: str) -> tuple[dict, str]:
+    code = _extract_domestic_code_from_ticker(ticker)
+    if not code:
+        return {}, "Naver 재무요약은 국내 티커(.KS/.KQ)만 지원합니다."
+
+    try:
+        resp = requests.get(
+            "https://finance.naver.com/item/main.naver",
+            params={"code": code},
+            headers=HTTP_HEADERS_COMMON,
+            timeout=14,
+        )
+        resp.raise_for_status()
+        body = resp.text or ""
+    except Exception as exc:
+        return {}, f"Naver 기업 페이지 조회 실패: {exc}"
+
+    title_match = re.search(r"<title>(.*?)</title>", body, re.I | re.S)
+    raw_title = html.unescape(title_match.group(1)).strip() if title_match else ""
+    name = raw_title.split(":")[0].strip() if ":" in raw_title else raw_title
+    sector, _ = fetch_sector_from_naver_domestic(f"{code}.KS")
+
+    def cell_metric(label: str) -> float | None:
+        pat = rf"<th[^>]*>\s*<strong>\s*{label}[^<]*</strong>\s*</th>\s*<td[^>]*>(.*?)</td>"
+        m = re.search(pat, body, re.I | re.S)
+        if not m:
+            return None
+        cell = re.sub(r"<.*?>", " ", m.group(1) or "")
+        cell = html.unescape(re.sub(r"\s+", " ", cell)).strip()
+        return _safe_to_float(cell)
+
+    summary = {
+        "name": name or "",
+        "sector": sector or "",
+        "industry": sector or "",
+        "country": "대한민국",
+        "market_cap": None,
+        "enterprise_value": None,
+        "total_revenue": None,
+        "ebitda": None,
+        "net_income_to_common": None,
+        "operating_cashflow": None,
+        "free_cashflow": None,
+        "dividend_yield_pct": _to_pct_value(cell_metric("배당수익률")),
+        "revenue_growth_pct": None,
+        "earnings_growth_pct": None,
+        "roe_pct": _to_pct_value(cell_metric("ROE")),
+        "operating_margin_pct": None,
+        "gross_margin_pct": None,
+        "debt_to_equity": None,
+        "current_ratio": None,
+        "trailing_pe": cell_metric("PER"),
+        "forward_pe": None,
+        "price_to_book": cell_metric("PBR"),
+        "beta": None,
+        "website": "",
+        "business_summary": "",
+        "income_statement_annual": [],
+        "balance_sheet_annual": [],
+        "cashflow_annual": [],
+    }
+    has_core = bool(summary.get("name") or summary.get("sector") or summary.get("trailing_pe") or summary.get("price_to_book"))
+    if not has_core:
+        return {}, "Naver 요약 정보를 찾지 못했습니다."
+    return summary, ""
+
+
+def fetch_company_financial_summary_from_google_finance(ticker: str) -> tuple[dict, str]:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
+        return {}, "티커가 비어 있습니다."
+
+    page_html = ""
+    final_symbol = ""
+    last_err = ""
+    for symbol in _google_quote_symbol_candidates(tkr):
+        url = f"https://www.google.com/finance/quote/{symbol}"
+        try:
+            resp = requests.get(
+                url,
+                headers={**HTTP_HEADERS_COMMON, "Accept-Language": "en-US,en;q=0.9"},
+                timeout=14,
+            )
+            if resp.status_code >= 400:
+                last_err = f"{symbol} 상태코드 {resp.status_code}"
+                continue
+            text = resp.text or ""
+            if "google.com/finance/quote" not in text:
+                last_err = f"{symbol} 페이지 구조 불일치"
+                continue
+            page_html = text
+            final_symbol = symbol
+            break
+        except Exception as exc:
+            last_err = str(exc)
+            continue
+
+    if not page_html:
+        return {}, f"Google Finance 조회 실패: {last_err or '결과 없음'}"
+
+    title_match = re.search(r"<title>(.*?)</title>", page_html, re.I | re.S)
+    title_text = html.unescape(title_match.group(1)).strip() if title_match else ""
+    name = title_text.split("(")[0].strip() if "(" in title_text else title_text
+    meta_match = re.search(r'<meta name=\"description\" content=\"([^\"]+)\"', page_html, re.I)
+    business_summary = html.unescape(meta_match.group(1)).strip() if meta_match else ""
+
+    market_cap_text = _extract_google_finance_metric_value(page_html, "Market cap")
+    pe_text = _extract_google_finance_metric_value(page_html, "P/E ratio")
+    div_text = _extract_google_finance_metric_value(page_html, "Dividend yield")
+    pbr_text = _extract_google_finance_metric_value(page_html, "Price to book")
+    de_text = _extract_google_finance_metric_value(page_html, "D/E ratio")
+
+    summary = {
+        "name": name or "",
+        "sector": "",
+        "industry": "",
+        "country": "대한민국" if ":KRX" in final_symbol else "",
+        "market_cap": _parse_number_with_short_unit(market_cap_text),
+        "enterprise_value": None,
+        "total_revenue": None,
+        "ebitda": None,
+        "net_income_to_common": None,
+        "operating_cashflow": None,
+        "free_cashflow": None,
+        "dividend_yield_pct": _to_pct_value(div_text),
+        "revenue_growth_pct": None,
+        "earnings_growth_pct": None,
+        "roe_pct": None,
+        "operating_margin_pct": None,
+        "gross_margin_pct": None,
+        "debt_to_equity": _safe_to_float(de_text),
+        "current_ratio": None,
+        "trailing_pe": _safe_to_float(pe_text),
+        "forward_pe": None,
+        "price_to_book": _safe_to_float(pbr_text),
+        "beta": None,
+        "website": "",
+        "business_summary": business_summary,
+        "income_statement_annual": [],
+        "balance_sheet_annual": [],
+        "cashflow_annual": [],
+    }
+    has_core = bool(summary.get("name") or summary.get("market_cap") or summary.get("trailing_pe"))
+    if not has_core:
+        return {}, "Google Finance 핵심 요약값을 찾지 못했습니다."
+    return summary, ""
+
+
 def fetch_company_financial_summary_from_yfinance(ticker: str) -> tuple[dict, str]:
     ticker = (ticker or "").strip()
     if not ticker:
@@ -3974,9 +4194,32 @@ def fetch_company_financial_summary_from_finnhub(ticker: str, api_key: str) -> t
 
 
 def fetch_company_financial_summary_multi_source(ticker: str) -> tuple[dict, str, str]:
+    source_chain: list[str] = []
+    errs: list[str] = []
+    merged_summary: dict = {}
+
     summary, err = fetch_company_financial_summary_from_yfinance(ticker)
     if not err and summary:
-        return summary, "", "yfinance"
+        merged_summary = dict(summary)
+        source_chain.append("yfinance")
+    elif err:
+        errs.append(err)
+
+    naver_summary, naver_err = fetch_company_financial_summary_from_naver(ticker)
+    if not naver_err and naver_summary:
+        merged_summary, _ = _merge_financial_summary_dicts(merged_summary, naver_summary)
+        if "naver" not in source_chain:
+            source_chain.append("naver")
+    elif naver_err:
+        errs.append(naver_err)
+
+    google_summary, google_err = fetch_company_financial_summary_from_google_finance(ticker)
+    if not google_err and google_summary:
+        merged_summary, _ = _merge_financial_summary_dicts(merged_summary, google_summary)
+        if "google_finance" not in source_chain:
+            source_chain.append("google_finance")
+    elif google_err:
+        errs.append(google_err)
 
     alpha_key, finnhub_key = get_market_data_api_keys()
     alpha_err = ""
@@ -3984,15 +4227,36 @@ def fetch_company_financial_summary_multi_source(ticker: str) -> tuple[dict, str
     if alpha_key:
         alpha_summary, alpha_err = fetch_company_financial_summary_from_alpha_vantage(ticker, alpha_key)
         if not alpha_err and alpha_summary:
-            return alpha_summary, "", "alpha_vantage"
+            merged_summary, _ = _merge_financial_summary_dicts(merged_summary, alpha_summary)
+            if "alpha_vantage" not in source_chain:
+                source_chain.append("alpha_vantage")
+        elif alpha_err:
+            errs.append(alpha_err)
 
     if finnhub_key:
         fin_summary, fin_err = fetch_company_financial_summary_from_finnhub(ticker, finnhub_key)
         if not fin_err and fin_summary:
-            return fin_summary, "", "finnhub"
+            merged_summary, _ = _merge_financial_summary_dicts(merged_summary, fin_summary)
+            if "finnhub" not in source_chain:
+                source_chain.append("finnhub")
+        elif fin_err:
+            errs.append(fin_err)
 
-    errs = [e for e in [err, alpha_err, fin_err] if e]
-    return {}, " | ".join(errs) if errs else "기업 재무 정보를 불러오지 못했습니다.", ""
+    if merged_summary:
+        if source_chain:
+            merged_summary["data_sources"] = source_chain
+        source_label = "+".join(source_chain) if source_chain else "multi_source"
+        return merged_summary, "", source_label
+
+    uniq_errs = []
+    seen_err = set()
+    for msg in errs:
+        m = str(msg or "").strip()
+        if not m or m in seen_err:
+            continue
+        uniq_errs.append(m)
+        seen_err.add(m)
+    return {}, " | ".join(uniq_errs) if uniq_errs else "기업 재무 정보를 불러오지 못했습니다.", ""
 
 
 def _lines_to_text(value) -> str:
