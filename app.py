@@ -4989,28 +4989,41 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             ]
         )
 
+    featured_hist = pd.DataFrame()
+
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">총 자산금액 변화 (꺾은선)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">총 자산 추이 (평가금액/원금)</div>', unsafe_allow_html=True)
     if hist_df.empty:
-        st.info("아직 저장된 스냅샷이 없어 꺾은선 그래프를 표시할 수 없습니다. 기록 입력 탭에서 먼저 저장해 주세요.")
+        st.info("아직 저장된 스냅샷이 없어 자산 추이 그래프를 표시할 수 없습니다. 기록 입력 탭에서 먼저 저장해 주세요.")
     else:
-        core_line_fig = px.line(
-            hist_df,
-            x="snapshot_date",
-            y="total_value",
-            markers=True,
-            title="내 총 자산금액 변화",
-            labels={"snapshot_date": "날짜", "total_value": "총 자산금액(원)"},
-            color_discrete_sequence=["#0f766e"],
+        period = st.radio(
+            "조회 기간",
+            options=["1개월", "3개월", "6개월", "YTD", "1년", "전체"],
+            horizontal=True,
+            index=5,
+            key="dashboard_asset_period",
         )
-        core_line_fig.update_traces(
-            line={"width": 3},
-            marker={"size": 8},
-            fill="tozeroy",
-            fillcolor="rgba(15, 118, 110, 0.22)",
-        )
-        add_line_labels(core_line_fig, pct=False, last_only=False)
-        st.plotly_chart(style_figure(apply_daily_date_axis(core_line_fig)), use_container_width=True)
+        filtered_hist = filter_history_by_period(hist_df, period)
+        if filtered_hist.empty:
+            st.warning("선택한 기간에 데이터가 없습니다.")
+        else:
+            featured_hist = add_history_features(filtered_hist)
+            core_line_fig = px.line(
+                featured_hist,
+                x="snapshot_date",
+                y=["total_value", "total_principal"],
+                markers=True,
+                title="총 자산 추이",
+                labels={"snapshot_date": "날짜", "value": "금액(원)", "variable": "지표"},
+                color_discrete_sequence=["#0f766e", "#334155"],
+            )
+            core_line_fig.for_each_trace(
+                lambda t: t.update(name="총평가금액" if t.name == "total_value" else "총원금")
+            )
+            core_line_fig.update_traces(line={"width": 3}, marker={"size": 8})
+            add_line_labels(core_line_fig, pct=False, last_only=False)
+            st.plotly_chart(style_figure(apply_daily_date_axis(core_line_fig)), use_container_width=True)
+
         if "is_carry_forward" in hist_df.columns and bool(hist_df.iloc[-1].get("is_carry_forward", False)):
             st.caption("오늘 스냅샷이 없어 최근 저장 자산값을 오늘 날짜로 동일 반영했습니다.")
     st.markdown("</div>", unsafe_allow_html=True)
@@ -5158,33 +5171,14 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    period = st.radio(
-        "조회 기간",
-        options=["1개월", "3개월", "6개월", "YTD", "1년", "전체"],
-        horizontal=True,
-        index=5,
-    )
-
-    filtered_hist = filter_history_by_period(hist_df, period)
-    if filtered_hist.empty:
-        st.warning("선택한 기간에 데이터가 없습니다.")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    featured_hist = add_history_features(filtered_hist)
-
-    asset_fig = px.line(
-        featured_hist,
-        x="snapshot_date",
-        y=["total_value", "total_principal"],
-        markers=True,
-        color_discrete_sequence=["#0f766e", "#334155"],
-        title="총 자산 추이",
-        labels={"snapshot_date": "날짜", "value": "금액(원)", "variable": "지표"},
-    )
-    asset_fig.for_each_trace(lambda t: t.update(name="총 평가금액" if t.name == "total_value" else "총 원금"))
-    add_line_labels(asset_fig, pct=False, last_only=False)
-    st.plotly_chart(style_figure(apply_daily_date_axis(asset_fig)), use_container_width=True)
+    if featured_hist.empty:
+        active_period = str(st.session_state.get("dashboard_asset_period", "전체") or "전체")
+        fallback_hist = filter_history_by_period(hist_df, active_period)
+        if fallback_hist.empty:
+            st.warning("선택한 기간에 데이터가 없습니다.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+        featured_hist = add_history_features(fallback_hist)
 
     flow_col1, flow_col2 = st.columns([1.5, 1])
     with flow_col1:
