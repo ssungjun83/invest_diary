@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 import os
 import hashlib
 import hmac
+from io import BytesIO
 
 import pandas as pd
 import plotly.express as px
@@ -893,17 +894,26 @@ def resolve_excel_path() -> Path | None:
     return None
 
 
-def load_portfolio_from_excel() -> pd.DataFrame:
-    excel_path = resolve_excel_path()
-    if excel_path is None:
-        return empty_portfolio_df()
-
+def _get_uploaded_excel_bytes() -> tuple[bytes, str]:
     try:
-        xls = pd.ExcelFile(excel_path)
+        payload = st.session_state.get("uploaded_portfolio_excel_bytes", b"")
+        filename = str(st.session_state.get("uploaded_portfolio_excel_name", "") or "").strip()
+    except Exception:
+        return b"", ""
+    if isinstance(payload, bytearray):
+        payload = bytes(payload)
+    if isinstance(payload, bytes) and payload:
+        return payload, filename
+    return b"", ""
+
+
+def _read_portfolio_excel_source(excel_source) -> pd.DataFrame:
+    try:
+        xls = pd.ExcelFile(excel_source)
     except Exception:
         return empty_portfolio_df()
 
-    preferred = ["보유현황", "포트폴리오", "portfolio", "sheet1", "Sheet1"]
+    preferred = ["보유현황", "포트폴리오", "입력_오늘", "portfolio", "sheet1", "Sheet1"]
     ordered_sheets = [s for s in preferred if s in xls.sheet_names] + [s for s in xls.sheet_names if s not in preferred]
 
     for sheet_name in ordered_sheets:
@@ -959,6 +969,19 @@ def load_portfolio_from_excel() -> pd.DataFrame:
         return view[COLUMNS]
 
     return empty_portfolio_df()
+
+
+def load_portfolio_from_excel() -> pd.DataFrame:
+    uploaded_bytes, _ = _get_uploaded_excel_bytes()
+    if uploaded_bytes:
+        uploaded_df = _read_portfolio_excel_source(BytesIO(uploaded_bytes))
+        if not uploaded_df.empty:
+            return uploaded_df
+
+    excel_path = resolve_excel_path()
+    if excel_path is None:
+        return empty_portfolio_df()
+    return _read_portfolio_excel_source(excel_path)
 
 
 def _query_snapshot_for_date(conn: sqlite3.Connection, snapshot_date: date | str) -> pd.DataFrame:
@@ -3384,6 +3407,224 @@ def get_market_data_api_keys() -> tuple[str, str]:
     return alpha_key, finnhub_key
 
 
+def _to_bool_flag(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _read_first_secret_or_env(keys: list[str]) -> str:
+    for key in keys:
+        value = ""
+        try:
+            value = str(st.secrets.get(key, "") or "").strip()
+        except Exception:
+            value = ""
+        if not value:
+            value = str(os.getenv(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def get_github_sync_settings() -> dict[str, str | bool]:
+    return {
+        "enabled": _to_bool_flag(st.session_state.get("github_sync_enabled", False)),
+        "repo": str(st.session_state.get("github_repo", "") or "").strip(),
+        "branch": str(st.session_state.get("github_branch", "main") or "main").strip(),
+        "excel_path": str(st.session_state.get("github_excel_path", "portfolio_auto.xlsx") or "").strip(),
+        "token": str(st.session_state.get("github_token", "") or "").strip(),
+    }
+
+
+def fetch_excel_bytes_from_github(
+    repo: str,
+    path: str,
+    branch: str = "main",
+    token: str = "",
+) -> tuple[bytes, str]:
+    repo_text = str(repo or "").strip()
+    path_text = str(path or "").strip()
+    branch_text = str(branch or "main").strip() or "main"
+    token_text = str(token or "").strip()
+    if not repo_text or "/" not in repo_text:
+        return b"", "GitHub repo 형식이 올바르지 않습니다. (예: owner/repo)"
+    if not path_text:
+        return b"", "GitHub 엑셀 경로를 입력해 주세요."
+
+    headers = {"Accept": "application/vnd.github+json"}
+    if token_text:
+        headers["Authorization"] = f"Bearer {token_text}"
+
+    url = f"https://api.github.com/repos/{repo_text}/contents/{path_text}"
+    try:
+        resp = requests.get(url, headers=headers, params={"ref": branch_text}, timeout=18)
+        if resp.status_code == 404:
+            return b"", "GitHub에 엑셀 파일이 아직 없습니다."
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        encoded = str(payload.get("content") or "").strip().replace("\n", "")
+        if not encoded:
+            return b"", "GitHub 파일 내용을 읽지 못했습니다."
+        return base64.b64decode(encoded), ""
+    except Exception as exc:
+        return b"", f"GitHub 엑셀 다운로드 실패: {exc}"
+
+
+def upload_excel_bytes_to_github(
+    repo: str,
+    path: str,
+    branch: str,
+    token: str,
+    excel_bytes: bytes,
+    commit_message: str,
+) -> tuple[bool, str]:
+    repo_text = str(repo or "").strip()
+    path_text = str(path or "").strip()
+    branch_text = str(branch or "main").strip() or "main"
+    token_text = str(token or "").strip()
+    if not repo_text or "/" not in repo_text:
+        return False, "GitHub repo 형식이 올바르지 않습니다. (예: owner/repo)"
+    if not path_text:
+        return False, "GitHub 엑셀 경로를 입력해 주세요."
+    if not token_text:
+        return False, "GitHub Token이 필요합니다. (repo 권한)"
+    if not excel_bytes:
+        return False, "업로드할 엑셀 데이터가 비어 있습니다."
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token_text}",
+    }
+    url = f"https://api.github.com/repos/{repo_text}/contents/{path_text}"
+
+    existing_sha = ""
+    try:
+        existing_resp = requests.get(url, headers=headers, params={"ref": branch_text}, timeout=18)
+        if existing_resp.status_code == 200:
+            existing_payload = existing_resp.json() or {}
+            existing_sha = str(existing_payload.get("sha") or "").strip()
+        elif existing_resp.status_code not in {404}:
+            existing_resp.raise_for_status()
+    except Exception as exc:
+        return False, f"GitHub 기존 파일 조회 실패: {exc}"
+
+    body = {
+        "message": commit_message,
+        "content": base64.b64encode(excel_bytes).decode("utf-8"),
+        "branch": branch_text,
+    }
+    if existing_sha:
+        body["sha"] = existing_sha
+
+    try:
+        put_resp = requests.put(url, headers=headers, json=body, timeout=22)
+        if put_resp.status_code not in {200, 201}:
+            try:
+                err_payload = put_resp.json() or {}
+                err_msg = err_payload.get("message") or put_resp.text
+            except Exception:
+                err_msg = put_resp.text
+            return False, f"GitHub 업로드 실패: {err_msg}"
+        return True, "GitHub 엑셀 자동 저장 완료"
+    except Exception as exc:
+        return False, f"GitHub 업로드 실패: {exc}"
+
+
+def build_portfolio_excel_bytes(snapshot_date: date, holdings_df: pd.DataFrame) -> bytes:
+    usd_krw_rate = float(get_usd_krw_rate_for_date(snapshot_date)[0])
+    view = ensure_portfolio_columns(holdings_df, usd_krw_rate, force_usd_rate=True).copy()
+    for col in COLUMNS:
+        if col not in view.columns:
+            view[col] = pd.NA
+    export_df = view[COLUMNS].copy()
+    cash_krw, cash_usd = load_snapshot_cash(snapshot_date)
+    meta_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": snapshot_date.isoformat(),
+                "cash_krw": float(cash_krw),
+                "cash_usd": float(cash_usd),
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "usd_krw": usd_krw_rate,
+            }
+        ]
+    )
+
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        export_df.to_excel(writer, sheet_name="보유현황", index=False)
+        meta_df.to_excel(writer, sheet_name="메타", index=False)
+    return out.getvalue()
+
+
+def sync_snapshot_to_github_excel(snapshot_date: date, holdings_df: pd.DataFrame) -> tuple[bool, str]:
+    cfg = get_github_sync_settings()
+    if not bool(cfg["enabled"]):
+        return False, ""
+
+    repo = str(cfg["repo"] or "").strip()
+    branch = str(cfg["branch"] or "main").strip() or "main"
+    excel_path = str(cfg["excel_path"] or "").strip()
+    token = str(cfg["token"] or "").strip()
+    if not repo or not excel_path:
+        return False, "GitHub 동기화가 켜져 있지만 repo/path 설정이 비어 있습니다."
+
+    excel_bytes = build_portfolio_excel_bytes(snapshot_date, holdings_df)
+    msg = (
+        f"auto: portfolio snapshot {snapshot_date.isoformat()} "
+        f"({datetime.now().isoformat(timespec='seconds')})"
+    )
+    return upload_excel_bytes_to_github(
+        repo=repo,
+        path=excel_path,
+        branch=branch,
+        token=token,
+        excel_bytes=excel_bytes,
+        commit_message=msg,
+    )
+
+
+def bootstrap_excel_from_github_if_needed() -> None:
+    cfg = get_github_sync_settings()
+    if not bool(cfg["enabled"]):
+        return
+
+    try:
+        has_uploaded = bool(st.session_state.get("uploaded_portfolio_excel_bytes", b""))
+    except Exception:
+        has_uploaded = False
+    if has_uploaded:
+        return
+
+    repo = str(cfg["repo"] or "").strip()
+    branch = str(cfg["branch"] or "main").strip() or "main"
+    excel_path = str(cfg["excel_path"] or "").strip()
+    token = str(cfg["token"] or "").strip()
+    if not repo or not excel_path:
+        return
+
+    sync_sig = f"{repo}|{branch}|{excel_path}|{int(bool(token))}"
+    if st.session_state.get("github_bootstrap_sig", "") == sync_sig:
+        return
+    st.session_state["github_bootstrap_sig"] = sync_sig
+
+    excel_bytes, err = fetch_excel_bytes_from_github(
+        repo=repo,
+        path=excel_path,
+        branch=branch,
+        token=token,
+    )
+    if err:
+        st.session_state["github_sync_notice"] = err
+        return
+
+    file_name = excel_path.split("/")[-1] if "/" in excel_path else excel_path
+    st.session_state["uploaded_portfolio_excel_bytes"] = excel_bytes
+    st.session_state["uploaded_portfolio_excel_name"] = f"github:{file_name}"
+    st.session_state["uploaded_portfolio_excel_sig"] = hashlib.sha256(excel_bytes).hexdigest()
+    st.session_state["editing_df_date"] = ""
+    st.session_state["github_sync_notice"] = f"GitHub 엑셀 자동 불러오기 완료: {excel_path}"
+
+
 def load_app_settings() -> dict[str, str]:
     conn = get_conn()
     try:
@@ -3415,15 +3656,29 @@ def save_app_settings(settings: dict[str, str]) -> None:
 
 def initialize_api_settings(force: bool = False) -> None:
     settings = load_app_settings()
+    store_sensitive = _to_bool_flag(settings.get("store_sensitive_keys", "false"))
     global_provider = normalize_ai_provider(settings.get("ai_provider", "openai"))
-    global_openai_key = settings.get("openai_api_key", "")
-    global_claude_key = settings.get("claude_api_key", "")
-    global_alpha_key = settings.get("alpha_vantage_api_key", "")
-    global_finnhub_key = settings.get("finnhub_api_key", "")
+    global_openai_key = settings.get("openai_api_key", "") if store_sensitive else ""
+    global_claude_key = settings.get("claude_api_key", "") if store_sensitive else ""
+    global_alpha_key = settings.get("alpha_vantage_api_key", "") if store_sensitive else ""
+    global_finnhub_key = settings.get("finnhub_api_key", "") if store_sensitive else ""
     global_openai_model = settings.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL
     global_claude_model = settings.get("claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL
+    github_sync_enabled = _to_bool_flag(settings.get("github_sync_enabled", "false"))
+    github_repo = settings.get("github_repo", "")
+    github_branch = settings.get("github_branch", "main") or "main"
+    github_excel_path = settings.get("github_excel_path", "portfolio_auto.xlsx") or "portfolio_auto.xlsx"
+    github_token = settings.get("github_token", "") if store_sensitive else ""
+
+    # Secure source priority: secrets/env > DB
+    global_openai_key = _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"]) or global_openai_key
+    global_claude_key = _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"]) or global_claude_key
+    global_alpha_key = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or global_alpha_key
+    global_finnhub_key = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or global_finnhub_key
+    github_token = _read_first_secret_or_env(["GITHUB_TOKEN", "GH_TOKEN"]) or github_token
 
     global_map = {
+        "store_sensitive_keys": store_sensitive,
         "global_ai_provider": global_provider,
         "global_openai_api_key": global_openai_key,
         "global_claude_api_key": global_claude_key,
@@ -3431,6 +3686,11 @@ def initialize_api_settings(force: bool = False) -> None:
         "global_finnhub_api_key": global_finnhub_key,
         "global_openai_model": global_openai_model,
         "global_claude_model": global_claude_model,
+        "github_sync_enabled": github_sync_enabled,
+        "github_repo": github_repo,
+        "github_branch": github_branch,
+        "github_excel_path": github_excel_path,
+        "github_token": github_token,
     }
     for k, v in global_map.items():
         if force or k not in st.session_state:
@@ -4121,6 +4381,29 @@ def get_monthly_return_table(hist_df: pd.DataFrame) -> pd.DataFrame:
 
 def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_date: date) -> None:
     hist_df = load_history(as_of_date=selected_date)
+    if hist_df.empty and current_df is not None and not current_df.empty:
+        current_view = to_krw_view(current_df, usd_krw_rate)
+        stock_value = float(current_view[COL_VALUE_KRW].sum())
+        stock_pnl = float(current_view[COL_PNL_KRW].sum())
+        cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(selected_date, usd_krw_rate)
+        total_value = stock_value + float(cash_total_krw)
+        total_pnl = stock_pnl
+        total_principal = total_value - total_pnl
+        total_return_pct = (total_pnl / total_principal * 100.0) if total_principal else 0.0
+        hist_df = pd.DataFrame(
+            [
+                {
+                    "snapshot_date": pd.Timestamp(selected_date),
+                    "total_value": total_value,
+                    "total_pnl": total_pnl,
+                    "cash_krw": float(cash_krw),
+                    "cash_usd": float(cash_usd),
+                    "is_carry_forward": True,
+                    "total_principal": total_principal,
+                    "total_return_pct": total_return_pct,
+                }
+            ]
+        )
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">총 자산금액 변화 (꺾은선)</div>', unsafe_allow_html=True)
@@ -4684,6 +4967,16 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
                     ):
                         save_snapshot_cash(target_date, final_cash_krw, final_cash_usd)
 
+                    sync_target_df = (
+                        merged_df
+                        if not incoming_df.empty
+                        else ensure_portfolio_columns(load_snapshot(target_date), usd_krw_rate, force_usd_rate=True)
+                    )
+                    sync_ok, sync_msg = sync_snapshot_to_github_excel(target_date, sync_target_df)
+                    sync_note = ""
+                    if sync_msg:
+                        sync_note = f" / GitHub {'저장 완료' if sync_ok else '저장 실패'}: {sync_msg}"
+
                     holdings_meta = holdings_rows if isinstance(holdings_rows, list) else []
                     for row in holdings_meta:
                         if not isinstance(row, dict):
@@ -4702,7 +4995,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
                     st.session_state["portfolio_image_notice"] = (
                         f"이미지 자동 등록 완료: {reflected_count}개 종목 반영, 저장일 {target_date.isoformat()} / "
                         f"예수금 원화 {final_cash_krw:,.0f}원, 달러 {format_usd(final_cash_usd)} "
-                        "(업로드 이미지 초기화 완료)"
+                        f"(업로드 이미지 초기화 완료){sync_note}"
                     )
                     st.rerun()
 
@@ -4739,7 +5032,14 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             else:
                 save_snapshot(selected_date, final_df)
                 st.session_state["editing_df"] = final_df
-                st.success(f"{selected_date} 스냅샷 저장 완료")
+                sync_ok, sync_msg = sync_snapshot_to_github_excel(selected_date, final_df)
+                if sync_msg:
+                    if sync_ok:
+                        st.success(f"{selected_date} 스냅샷 저장 완료 / {sync_msg}")
+                    else:
+                        st.warning(f"{selected_date} 스냅샷 저장 완료 / GitHub 동기화 경고: {sync_msg}")
+                else:
+                    st.success(f"{selected_date} 스냅샷 저장 완료")
 
     with dl_col:
         csv = final_df.to_csv(index=False).encode("utf-8-sig")
@@ -6653,7 +6953,8 @@ def render_api_settings_tab() -> None:
     st.markdown('<div class="section-title">API 설정</div>', unsafe_allow_html=True)
     st.caption(
         "OpenAI/Claude API 키와 기본 모델을 저장하면 기업정보/기업분석/기업 점수 탭에서 공통으로 사용합니다. "
-        "추가로 Alpha Vantage/Finnhub 키를 넣으면 야후 외 경로로 기업 데이터를 보조 수집합니다."
+        "추가로 Alpha Vantage/Finnhub 키를 넣으면 야후 외 경로로 기업 데이터를 보조 수집합니다. "
+        "GitHub 동기화를 켜면 엑셀을 원격 저장소에서 자동 불러오고 저장 시 자동 커밋합니다."
     )
 
     if "api_settings_saved_notice" in st.session_state:
@@ -6663,6 +6964,8 @@ def render_api_settings_tab() -> None:
         st.session_state["global_openai_model_options"] = []
     if "global_claude_model_options" not in st.session_state:
         st.session_state["global_claude_model_options"] = []
+    if "store_sensitive_keys" not in st.session_state:
+        st.session_state["store_sensitive_keys"] = False
 
     st.selectbox(
         "기본 AI 제공자",
@@ -6684,6 +6987,13 @@ def render_api_settings_tab() -> None:
         type="password",
         placeholder="finnhub 키",
     )
+    st.checkbox(
+        "민감키를 로컬 DB에 저장 (비권장)",
+        key="store_sensitive_keys",
+        help="권장: 해제 상태 유지 후 Streamlit Secrets/환경변수로 관리",
+    )
+    if not bool(st.session_state.get("store_sensitive_keys", False)):
+        st.caption("권장 모드: API 키/GitHub Token은 DB에 저장하지 않고 현재 세션 + Secrets/환경변수만 사용")
 
     fetch_col1, fetch_col2, fetch_col3 = st.columns([1, 1, 1.2])
     with fetch_col1:
@@ -6733,6 +7043,60 @@ def render_api_settings_tab() -> None:
     else:
         st.text_input("Claude 모델", key="global_claude_model")
 
+    st.markdown("#### GitHub 엑셀 자동 동기화")
+    st.checkbox("GitHub 동기화 사용", key="github_sync_enabled")
+    st.text_input("GitHub Repo", key="github_repo", placeholder="owner/repo")
+    st.text_input("GitHub Branch", key="github_branch", placeholder="main")
+    st.text_input("GitHub Excel Path", key="github_excel_path", placeholder="portfolio_auto.xlsx")
+    st.text_input("GitHub Token", key="github_token", type="password", placeholder="ghp_... (repo 권한)")
+
+    gh_col1, gh_col2 = st.columns([1, 1.2])
+    with gh_col1:
+        test_pull_btn = st.button("GitHub에서 엑셀 불러오기 테스트", key="api_test_pull_github_excel_btn")
+    with gh_col2:
+        test_push_btn = st.button("현재 데이터 GitHub에 즉시 저장", key="api_test_push_github_excel_btn")
+
+    if test_pull_btn:
+        cfg = get_github_sync_settings()
+        excel_bytes, err = fetch_excel_bytes_from_github(
+            repo=str(cfg["repo"] or ""),
+            path=str(cfg["excel_path"] or ""),
+            branch=str(cfg["branch"] or "main"),
+            token=str(cfg["token"] or ""),
+        )
+        if err:
+            st.warning(err)
+        else:
+            st.session_state["uploaded_portfolio_excel_bytes"] = excel_bytes
+            path_text = str(cfg["excel_path"] or "").strip()
+            file_name = path_text.split("/")[-1] if "/" in path_text else path_text
+            st.session_state["uploaded_portfolio_excel_name"] = f"github:{file_name}"
+            st.session_state["uploaded_portfolio_excel_sig"] = hashlib.sha256(excel_bytes).hexdigest()
+            st.session_state["editing_df_date"] = ""
+            st.success("GitHub 엑셀 불러오기 테스트 성공")
+            st.rerun()
+
+    if test_push_btn:
+        cfg = get_github_sync_settings()
+        if not bool(cfg["enabled"]):
+            st.warning("GitHub 동기화 사용을 먼저 켜 주세요.")
+        else:
+            latest_date, latest_df = load_latest_snapshot()
+            if latest_df.empty:
+                latest_df = load_snapshot(DEFAULT_DATE)
+                target_date = DEFAULT_DATE
+            else:
+                target_date = _safe_parse_date(latest_date) or DEFAULT_DATE
+
+            if latest_df.empty:
+                st.warning("GitHub로 저장할 포트폴리오 데이터가 없습니다.")
+            else:
+                ok, msg = sync_snapshot_to_github_excel(target_date, latest_df)
+                if ok:
+                    st.success(msg)
+                elif msg:
+                    st.warning(msg)
+
     action_col1, action_col2 = st.columns([1, 1.2])
     with action_col1:
         submit_save = st.button("API 설정 저장", type="primary", key="api_save_settings_btn")
@@ -6740,26 +7104,39 @@ def render_api_settings_tab() -> None:
         reload_btn = st.button("저장값 다시 불러오기", key="api_reload_settings_btn")
 
     if submit_save:
+        persist_sensitive = bool(st.session_state.get("store_sensitive_keys", False))
         save_app_settings(
             {
+                "store_sensitive_keys": "true" if persist_sensitive else "false",
                 "ai_provider": normalize_ai_provider(st.session_state.get("global_ai_provider", "openai")),
-                "openai_api_key": st.session_state.get("global_openai_api_key", ""),
-                "claude_api_key": st.session_state.get("global_claude_api_key", ""),
-                "alpha_vantage_api_key": st.session_state.get("global_alpha_vantage_api_key", ""),
-                "finnhub_api_key": st.session_state.get("global_finnhub_api_key", ""),
+                "openai_api_key": st.session_state.get("global_openai_api_key", "") if persist_sensitive else "",
+                "claude_api_key": st.session_state.get("global_claude_api_key", "") if persist_sensitive else "",
+                "alpha_vantage_api_key": st.session_state.get("global_alpha_vantage_api_key", "") if persist_sensitive else "",
+                "finnhub_api_key": st.session_state.get("global_finnhub_api_key", "") if persist_sensitive else "",
                 "openai_model": st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL),
                 "claude_model": st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL),
+                "github_sync_enabled": "true" if bool(st.session_state.get("github_sync_enabled", False)) else "false",
+                "github_repo": st.session_state.get("github_repo", ""),
+                "github_branch": st.session_state.get("github_branch", "main"),
+                "github_excel_path": st.session_state.get("github_excel_path", "portfolio_auto.xlsx"),
+                "github_token": st.session_state.get("github_token", "") if persist_sensitive else "",
             }
         )
-        st.session_state["force_reload_api_settings"] = True
-        st.session_state["api_settings_saved_notice"] = "API 설정을 저장했습니다."
+        st.session_state["api_settings_saved_notice"] = (
+            "API 설정 저장 완료 (민감키 DB 저장 ON)"
+            if persist_sensitive
+            else "API 설정 저장 완료 (민감키 DB 미저장, Secrets/환경변수 권장)"
+        )
         st.rerun()
 
     if reload_btn:
         st.session_state["force_reload_api_settings"] = True
         st.rerun()
 
-    st.caption("설정은 로컬 DB(`portfolio.db`)에 저장됩니다. 모델 목록은 각 API 키 권한에 따라 달라집니다.")
+    st.caption(
+        "설정은 로컬 DB(`portfolio.db`)에 저장됩니다. "
+        "민감키 DB 저장을 끄면 키는 비워 저장되며, Streamlit Secrets/환경변수를 우선 사용합니다."
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -6848,6 +7225,7 @@ def main() -> None:
     require_password_gate()
     force_reload = bool(st.session_state.pop("force_reload_api_settings", False))
     initialize_api_settings(force=force_reload)
+    bootstrap_excel_from_github_if_needed()
 
     st.markdown(
         """
@@ -6869,9 +7247,44 @@ def main() -> None:
         usd_krw_rate, fx_source = get_usd_krw_rate_for_date(selected_date)
         st.metric("해당일 USD/KRW", f"{usd_krw_rate:,.0f}")
         st.caption(f"환율 소스: {fx_source}")
+        uploaded_excel = st.file_uploader(
+            "포트폴리오 엑셀 업로드 (.xlsx)",
+            type=["xlsx"],
+            key="sidebar_portfolio_excel_upload",
+            help="Cloud/원격 실행 환경에서는 이 업로드 파일을 우선 사용합니다.",
+        )
+        if uploaded_excel is not None:
+            uploaded_bytes = uploaded_excel.getvalue()
+            uploaded_sig = hashlib.sha256(uploaded_bytes).hexdigest() if uploaded_bytes else ""
+            prev_sig = str(st.session_state.get("uploaded_portfolio_excel_sig", "") or "")
+            if uploaded_sig and uploaded_sig != prev_sig:
+                st.session_state["uploaded_portfolio_excel_bytes"] = uploaded_bytes
+                st.session_state["uploaded_portfolio_excel_name"] = str(uploaded_excel.name or "").strip()
+                st.session_state["uploaded_portfolio_excel_sig"] = uploaded_sig
+                st.session_state["editing_df_date"] = ""
+                st.session_state["portfolio_excel_notice"] = (
+                    f"엑셀 업로드 반영: {st.session_state['uploaded_portfolio_excel_name']}"
+                )
+                st.rerun()
+
+        uploaded_name = str(st.session_state.get("uploaded_portfolio_excel_name", "") or "").strip()
         excel_path = resolve_excel_path()
-        if excel_path:
+        if uploaded_name:
+            st.caption(f"엑셀 소스: 업로드 파일 ({uploaded_name})")
+        elif excel_path:
             st.caption(f"엑셀 자동 불러오기: {excel_path.name}")
+        else:
+            st.caption("엑셀 소스 없음: 파일 업로드 또는 서버 경로 설정 필요")
+        if uploaded_name and st.button("업로드 엑셀 해제", key="sidebar_clear_uploaded_excel_btn"):
+            for key in [
+                "uploaded_portfolio_excel_bytes",
+                "uploaded_portfolio_excel_name",
+                "uploaded_portfolio_excel_sig",
+            ]:
+                st.session_state.pop(key, None)
+            st.session_state["editing_df_date"] = ""
+            st.session_state["portfolio_excel_notice"] = "업로드 엑셀 연결을 해제했습니다."
+            st.rerun()
         use_sample = st.button("샘플 데이터로 시작", key="sidebar_use_sample_btn")
 
         if st.button("선택 날짜 데이터 불러오기", key="sidebar_load_date_btn"):
@@ -6880,6 +7293,16 @@ def main() -> None:
             )
             st.session_state["editing_df_date"] = selected_date_key
             st.success(f"{selected_date} 데이터 불러오기 완료")
+
+    if "portfolio_excel_notice" in st.session_state:
+        st.success(st.session_state.pop("portfolio_excel_notice"))
+    if "github_sync_notice" in st.session_state:
+        gh_notice = str(st.session_state.pop("github_sync_notice") or "").strip()
+        if gh_notice:
+            if "완료" in gh_notice:
+                st.success(gh_notice)
+            else:
+                st.warning(gh_notice)
 
     if use_sample:
         st.session_state["editing_df"] = ensure_portfolio_columns(
