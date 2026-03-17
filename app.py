@@ -710,7 +710,7 @@ def _store_fx_rate(rate_date: date, usd_krw: float, market_date: str | None, sou
         conn.close()
 
 
-def _load_cached_fx_rate(rate_date: date) -> tuple[float | None, str]:
+def _load_cached_fx_rate(rate_date: date) -> tuple[float | None, str, str]:
     conn = get_conn()
     try:
         row = conn.execute(
@@ -721,12 +721,12 @@ def _load_cached_fx_rate(rate_date: date) -> tuple[float | None, str]:
         conn.close()
 
     if not row:
-        return None, ""
+        return None, "", ""
 
     rate = float(row[0])
     market_date = row[1] or rate_date.isoformat()
     source = row[2] or "cache"
-    return rate, f"{source} ({market_date})"
+    return rate, source, market_date
 
 
 def _fetch_usd_krw_rate_from_yfinance(rate_date: date) -> tuple[float | None, str]:
@@ -767,18 +767,60 @@ def _fetch_usd_krw_rate_from_yfinance(rate_date: date) -> tuple[float | None, st
     return rate, market_dt
 
 
+def _fetch_usd_krw_rate_from_frankfurter(rate_date: date) -> tuple[float | None, str]:
+    start_date = (rate_date - timedelta(days=10)).isoformat()
+    end_date = rate_date.isoformat()
+    url = (
+        "https://api.frankfurter.app/"
+        f"{start_date}..{end_date}?from=USD&to=KRW"
+    )
+    try:
+        resp = requests.get(url, timeout=12)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    except Exception as exc:
+        return None, f"frankfurter 조회 실패: {exc}"
+
+    rates = payload.get("rates") or {}
+    if not isinstance(rates, dict) or not rates:
+        return None, "frankfurter 환율 데이터 없음"
+
+    latest_dt = ""
+    latest_rate = None
+    for dt_text in sorted(rates.keys()):
+        daily = rates.get(dt_text) or {}
+        try:
+            krw = float(daily.get("KRW"))
+        except Exception:
+            continue
+        latest_dt = dt_text
+        latest_rate = krw
+
+    if latest_rate is None:
+        return None, "frankfurter KRW 값 없음"
+    return latest_rate, latest_dt
+
+
 def get_usd_krw_rate_for_date(rate_date: date) -> tuple[float, str]:
-    cached_rate, cached_source = _load_cached_fx_rate(rate_date)
-    if cached_rate is not None:
-        return cached_rate, f"캐시 {cached_source}"
+    cached_rate, cached_source, cached_market_date = _load_cached_fx_rate(rate_date)
+    if cached_rate is not None and cached_source.lower() != "fallback":
+        return cached_rate, f"캐시 {cached_source} ({cached_market_date})"
 
     fetched_rate, market_date_or_msg = _fetch_usd_krw_rate_from_yfinance(rate_date)
     if fetched_rate is not None:
         _store_fx_rate(rate_date, fetched_rate, market_date_or_msg, "yfinance")
         return fetched_rate, f"yfinance ({market_date_or_msg})"
 
+    fetched_rate, market_date_or_msg = _fetch_usd_krw_rate_from_frankfurter(rate_date)
+    if fetched_rate is not None:
+        _store_fx_rate(rate_date, fetched_rate, market_date_or_msg, "frankfurter")
+        return fetched_rate, f"frankfurter ({market_date_or_msg})"
+
     fallback_rate = DEFAULT_USD_KRW
-    _store_fx_rate(rate_date, fallback_rate, rate_date.isoformat(), "fallback")
+    fallback_market_date = cached_market_date or rate_date.isoformat()
+    if cached_rate is not None and cached_source.lower() == "fallback":
+        fallback_rate = float(cached_rate)
+    _store_fx_rate(rate_date, fallback_rate, fallback_market_date, "fallback")
     return fallback_rate, f"fallback ({market_date_or_msg})"
 
 
