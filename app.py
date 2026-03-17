@@ -4260,6 +4260,33 @@ def clear_company_list_ticker(stock_name: str, source: str = "manual_edit_clear"
         conn.close()
 
 
+def clear_company_list_meta_all(source: str = "manual_meta_reset") -> int:
+    now_str = datetime.now().isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM company_list").fetchone()
+        total = int(row[0]) if row and row[0] is not None else 0
+        if total <= 0:
+            return 0
+        conn.execute(
+            """
+            UPDATE company_list
+            SET ticker = NULL,
+                sector = NULL,
+                price_krw = NULL,
+                price_source = NULL,
+                price_updated_at = NULL,
+                source = ?,
+                updated_at = ?
+            """,
+            ((source or "manual_meta_reset").strip(), now_str),
+        )
+        conn.commit()
+        return total
+    finally:
+        conn.close()
+
+
 def load_company_compare_sets() -> pd.DataFrame:
     conn = get_conn()
     try:
@@ -6511,7 +6538,87 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 "리스트소스": source_map.get(nm, ""),
             }
         )
-    meta_btn_col1, meta_btn_col2 = st.columns([1.2, 1.2])
+    def _bulk_fill_company_meta(
+        target_rows: list[dict],
+        ai_provider: str,
+        ai_api_key: str,
+        ai_model: str,
+        force_refresh: bool = False,
+    ) -> tuple[int, int, list[str]]:
+        updated_count = 0
+        skipped_count = 0
+        unresolved: list[str] = []
+
+        for row in target_rows:
+            company_name = str(row.get("기업명") or "").strip()
+            row_ticker = clean_valid_ticker(str(row.get("티커") or ""))
+            row_sector = str(row.get("산업섹터") or "").strip()
+            if not company_name:
+                skipped_count += 1
+                continue
+
+            current_ticker = "" if force_refresh else row_ticker
+            current_sector = "" if force_refresh else row_sector
+            next_ticker = current_ticker
+            next_sector = current_sector
+            market_pref = market_pref_map.get(company_name, "")
+
+            if not next_ticker:
+                auto_ticker, _ = resolve_ticker_auto_with_retry(
+                    company_name,
+                    use_ai=bool(ai_api_key),
+                    api_key=ai_api_key,
+                    model=ai_model,
+                    provider=ai_provider,
+                    market_preference=market_pref,
+                )
+                if auto_ticker:
+                    next_ticker = auto_ticker
+
+            if not next_sector and next_ticker:
+                fast_sector, _ = fetch_sector_from_yahoo_asset_profile(next_ticker)
+                if fast_sector:
+                    next_sector = fast_sector
+
+            if not next_sector and next_ticker:
+                fetched_summary, _, _ = fetch_company_financial_summary_multi_source(next_ticker)
+                if fetched_summary:
+                    next_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
+
+            if not next_sector and ai_api_key:
+                ai_sector, _ = infer_sector_with_ai(
+                    company_name,
+                    ticker=next_ticker,
+                    api_key=ai_api_key,
+                    model=ai_model,
+                    provider=ai_provider,
+                )
+                if ai_sector:
+                    next_sector = ai_sector
+
+            if not next_sector:
+                next_sector = infer_sector_from_name_heuristic(company_name, next_ticker)
+
+            changed = (next_ticker != current_ticker) or (next_sector != current_sector)
+            has_any_new = bool(next_ticker or next_sector)
+            if changed and has_any_new:
+                source_tag = "meta_refill_ai" if (force_refresh and ai_api_key) else "meta_refill"
+                if not force_refresh:
+                    source_tag = "auto_fill_ai" if ai_api_key else "auto_fill"
+                upsert_company_list_entry(
+                    company_name,
+                    next_ticker,
+                    sector=next_sector,
+                    source=source_tag,
+                )
+                updated_count += 1
+            else:
+                skipped_count += 1
+                if (not next_ticker) or (not next_sector):
+                    unresolved.append(company_name)
+        return updated_count, skipped_count, unresolved
+
+    meta_btn_col1, meta_btn_col2, meta_btn_col3 = st.columns([1.1, 1.1, 1.5])
     with meta_btn_col1:
         auto_fill_missing_btn = st.button(
             "빈 티커/산업섹터 일괄 채우기 (API+AI)",
@@ -6522,6 +6629,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             "현재 주가 일괄 불러오기 (API+AI)",
             key="analysis_fill_company_price_btn",
         )
+    with meta_btn_col3:
+        reset_and_refill_btn = st.button(
+            "티커/산업섹터 전체 초기화 후 재탐색 (API+AI)",
+            key="analysis_reset_refill_company_meta_btn",
+        )
 
     if auto_fill_missing_btn:
         ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
@@ -6529,73 +6641,14 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         if not targets:
             st.info("이미 모든 기업에 티커/산업섹터 정보가 있습니다.")
         else:
-            updated_count = 0
-            skipped_count = 0
-            unresolved = []
             with st.spinner("빈 정보만 자동으로 찾는 중입니다..."):
-                for row in targets:
-                    company_name = str(row.get("기업명") or "").strip()
-                    current_ticker = clean_valid_ticker(str(row.get("티커") or ""))
-                    current_sector = str(row.get("산업섹터") or "").strip()
-                    if not company_name:
-                        skipped_count += 1
-                        continue
-
-                    next_ticker = current_ticker
-                    next_sector = current_sector
-                    market_pref = market_pref_map.get(company_name, "")
-
-                    if not next_ticker:
-                        auto_ticker, _ = resolve_ticker_auto_with_retry(
-                            company_name,
-                            use_ai=bool(ai_api_key),
-                            api_key=ai_api_key,
-                            model=ai_model,
-                            provider=ai_provider,
-                            market_preference=market_pref,
-                        )
-                        if auto_ticker:
-                            next_ticker = auto_ticker
-
-                    if not next_sector and next_ticker:
-                        fast_sector, _ = fetch_sector_from_yahoo_asset_profile(next_ticker)
-                        if fast_sector:
-                            next_sector = fast_sector
-
-                    if not next_sector and next_ticker:
-                        fetched_summary, _, _ = fetch_company_financial_summary_multi_source(next_ticker)
-                        if fetched_summary:
-                            next_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
-
-                    if not next_sector and ai_api_key:
-                        ai_sector, _ = infer_sector_with_ai(
-                            company_name,
-                            ticker=next_ticker,
-                            api_key=ai_api_key,
-                            model=ai_model,
-                            provider=ai_provider,
-                        )
-                        if ai_sector:
-                            next_sector = ai_sector
-
-                    if not next_sector:
-                        next_sector = infer_sector_from_name_heuristic(company_name, next_ticker)
-
-                    changed = (next_ticker != current_ticker) or (next_sector != current_sector)
-                    has_any_new = bool(next_ticker or next_sector)
-                    if changed and has_any_new:
-                        source_tag = "auto_fill_ai" if ai_api_key else "auto_fill"
-                        upsert_company_list_entry(
-                            company_name,
-                            next_ticker,
-                            sector=next_sector,
-                            source=source_tag,
-                        )
-                        updated_count += 1
-                    else:
-                        skipped_count += 1
-                        if (not next_ticker) or (not next_sector):
-                            unresolved.append(company_name)
+                updated_count, skipped_count, unresolved = _bulk_fill_company_meta(
+                    targets,
+                    ai_provider=ai_provider,
+                    ai_api_key=ai_api_key,
+                    ai_model=ai_model,
+                    force_refresh=False,
+                )
 
             if updated_count > 0:
                 st.session_state["analysis_bulk_fill_notice"] = (
@@ -6608,6 +6661,35 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 remain = len(unresolved) - min(8, len(unresolved))
                 tail = f" 외 {remain}개" if remain > 0 else ""
                 st.session_state["analysis_bulk_fill_warning"] = f"일부 항목은 여전히 빈 값입니다: {preview}{tail}"
+            st.rerun()
+
+    if reset_and_refill_btn:
+        ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+        targets = [
+            {"기업명": str(row.get("기업명") or "").strip(), "티커": "", "산업섹터": ""}
+            for row in overview_rows
+            if str(row.get("기업명") or "").strip()
+        ]
+        if not targets:
+            st.info("재탐색할 기업이 없습니다.")
+        else:
+            cleared_count = clear_company_list_meta_all(source="manual_meta_reset")
+            with st.spinner("티커/산업섹터 전체 초기화 후 재탐색 중입니다..."):
+                updated_count, skipped_count, unresolved = _bulk_fill_company_meta(
+                    targets,
+                    ai_provider=ai_provider,
+                    ai_api_key=ai_api_key,
+                    ai_model=ai_model,
+                    force_refresh=True,
+                )
+            st.session_state["analysis_bulk_reset_notice"] = (
+                f"초기화+재탐색 완료: 초기화 {cleared_count}개, 업데이트 {updated_count}개, 유지/실패 {skipped_count}개"
+            )
+            if unresolved:
+                preview = ", ".join(unresolved[:8])
+                remain = len(unresolved) - min(8, len(unresolved))
+                tail = f" 외 {remain}개" if remain > 0 else ""
+                st.session_state["analysis_bulk_reset_warning"] = f"일부 항목은 여전히 미완성입니다: {preview}{tail}"
             st.rerun()
 
     if refresh_price_btn:
@@ -6673,6 +6755,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.success(st.session_state.pop("analysis_bulk_price_notice"))
     if "analysis_bulk_price_warning" in st.session_state:
         st.warning(st.session_state.pop("analysis_bulk_price_warning"))
+    if "analysis_bulk_reset_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_bulk_reset_notice"))
+    if "analysis_bulk_reset_warning" in st.session_state:
+        st.warning(st.session_state.pop("analysis_bulk_reset_warning"))
 
     if overview_rows:
         st.caption("목록에서 기업 행을 클릭하면 아래 기업명/티커 입력이 자동 선택됩니다.")
