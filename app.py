@@ -2529,13 +2529,20 @@ def resolve_sector_auto(
         heuristic = infer_sector_from_name_heuristic(name, "")
         return (heuristic, "name_heuristic") if heuristic else ("", "티커 없음")
 
+    # 국내 종목은 네이버 업종을 우선 사용한다.
+    if _extract_domestic_code_from_ticker(tkr):
+        naver_sector, naver_src = fetch_sector_from_naver_domestic(tkr)
+        if naver_sector:
+            return naver_sector, naver_src
+
     fast_sector, fast_src = fetch_sector_from_yahoo_asset_profile(tkr)
     if fast_sector:
         return fast_sector, fast_src
 
-    naver_sector, naver_src = fetch_sector_from_naver_domestic(tkr)
-    if naver_sector:
-        return naver_sector, naver_src
+    if not _extract_domestic_code_from_ticker(tkr):
+        naver_sector, naver_src = fetch_sector_from_naver_domestic(tkr)
+        if naver_sector:
+            return naver_sector, naver_src
 
     fetched_summary, _, fetched_source = fetch_company_financial_summary_multi_source(tkr)
     if isinstance(fetched_summary, dict) and fetched_summary:
@@ -2601,26 +2608,40 @@ def resolve_ticker_auto(
     if not name:
         return "", "기업명을 입력해 주세요."
     pref = _market_pref_normalized(market_preference)
+    has_hangul_name = bool(re.search(r"[가-힣]", name))
 
     builtin = get_builtin_ticker_hint(name)
     if builtin and _ticker_matches_market_preference(builtin, pref):
         return builtin, "내장 힌트"
 
-    web_ticker, web_source = search_ticker_web_first(name, market_preference=market_preference)
-    if web_ticker and _ticker_matches_market_preference(web_ticker, pref):
-        return web_ticker, web_source
+    # 한국기업 탐색 정확도를 위해 네이버증권을 최우선으로 시도한다.
+    # 시장 선호가 비어 있고 한글 기업명이면 국내를 우선 시도한 뒤, 실패 시 일반 탐색으로 재시도한다.
+    naver_pref = pref or ("domestic" if has_hangul_name else "")
+    nv_ticker, nv_source = search_ticker_naver(name, market_preference=naver_pref)
+    if (
+        not nv_ticker
+        and not pref
+        and naver_pref == "domestic"
+    ):
+        nv_ticker_any, nv_source_any = search_ticker_naver(name, market_preference="")
+        if nv_ticker_any:
+            nv_ticker, nv_source = nv_ticker_any, nv_source_any
+        elif nv_source_any:
+            nv_source = " | ".join([m for m in [nv_source, nv_source_any] if m])
+    if nv_ticker and _ticker_matches_market_preference(nv_ticker, naver_pref or pref):
+        return nv_ticker, nv_source
 
     saved = clean_valid_ticker(get_saved_ticker_hint(name))
     if saved and _ticker_matches_market_preference(saved, pref):
         return saved, "기존 저장 이력"
 
+    web_ticker, web_source = search_ticker_web_first(name, market_preference=market_preference)
+    if web_ticker and _ticker_matches_market_preference(web_ticker, pref):
+        return web_ticker, web_source
+
     yf_ticker, yf_source = search_ticker_yfinance(name, market_preference=market_preference)
     if yf_ticker and _ticker_matches_market_preference(yf_ticker, pref):
         return yf_ticker, yf_source
-
-    nv_ticker, nv_source = search_ticker_naver(name, market_preference=market_preference)
-    if nv_ticker and _ticker_matches_market_preference(nv_ticker, pref):
-        return nv_ticker, nv_source
 
     sec_ticker = ""
     sec_source = ""
@@ -2659,7 +2680,7 @@ def resolve_ticker_auto(
         ai_source_msg = ai_source or "AI 시장선호 조건 불일치"
 
     fallback_msgs = [
-        msg for msg in [ai_source_msg, web_source, yf_source, nv_source, sec_source, alpha_source, fin_source] if msg
+        msg for msg in [ai_source_msg, nv_source, web_source, yf_source, sec_source, alpha_source, fin_source] if msg
     ]
     return "", " | ".join(fallback_msgs) if fallback_msgs else "티커 자동 탐색에 실패했습니다."
 
