@@ -3983,6 +3983,20 @@ def _coerce_choice(value, allowed: set[str], default: str) -> str:
     return text if text in allowed else default
 
 
+def _sanitize_widget_text(value, default: str = "") -> str:
+    if isinstance(value, (list, tuple, set, dict)):
+        return default
+    text = str(value or "").strip()
+    if not text:
+        return default
+    lowered = text.lower()
+    if lowered in {"[object object]", "nan", "none", "null", "undefined"}:
+        return default
+    if re.match(r"^[\._]*arr\d+", lowered):
+        return default
+    return text
+
+
 def _read_first_secret_or_env(keys: list[str]) -> str:
     for key in keys:
         value = ""
@@ -7384,6 +7398,31 @@ def render_company_compare_tab(current_df: pd.DataFrame) -> None:
         st.session_state["compare_selected_set_name"] = str(st.session_state.pop("compare_selected_set_pending") or "선택안함")
     if "compare_set_notice" in st.session_state:
         st.success(st.session_state.pop("compare_set_notice"))
+
+    # 위젯 상태가 배열/객체로 오염되면 레이아웃 겹침이 발생할 수 있어 렌더 전에 정규화한다.
+    st.session_state["compare_ai_provider"] = _coerce_choice(
+        st.session_state.get("compare_ai_provider"),
+        {"openai", "claude"},
+        "openai",
+    )
+    st.session_state["compare_custom_weights"] = _to_bool_flag(st.session_state.get("compare_custom_weights", False))
+    st.session_state["compare_use_ai_ticker"] = _to_bool_flag(st.session_state.get("compare_use_ai_ticker", False))
+    for key in [
+        "compare_openai_api_key",
+        "compare_claude_api_key",
+        "compare_openai_model",
+        "compare_claude_model",
+        "compare_set_name",
+        "compare_set_note",
+        "compare_selected_set_name",
+    ]:
+        st.session_state[key] = _sanitize_widget_text(st.session_state.get(key), "")
+    st.session_state["compare_sector_filter"] = _sanitize_widget_text(
+        st.session_state.get("compare_sector_filter"),
+        "전체",
+    )
+    if st.session_state.get("compare_sector_filter") not in sector_options:
+        st.session_state["compare_sector_filter"] = "전체"
 
     compare_sets_df = load_company_compare_sets()
     saved_set_names = compare_sets_df["set_name"].dropna().astype(str).tolist() if not compare_sets_df.empty else []
