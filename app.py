@@ -6618,21 +6618,21 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     unresolved.append(company_name)
         return updated_count, skipped_count, unresolved
 
-    meta_btn_col1, meta_btn_col2, meta_btn_col3 = st.columns([1.1, 1.1, 1.5])
+    meta_btn_col1, meta_btn_col2, meta_btn_col3 = st.columns([1.1, 1.5, 1.1])
     with meta_btn_col1:
         auto_fill_missing_btn = st.button(
             "빈 티커/산업섹터 일괄 채우기 (API+AI)",
             key="analysis_fill_missing_company_meta_btn",
         )
     with meta_btn_col2:
-        refresh_price_btn = st.button(
-            "현재 주가 일괄 불러오기 (API+AI)",
-            key="analysis_fill_company_price_btn",
-        )
-    with meta_btn_col3:
         reset_and_refill_btn = st.button(
             "티커/산업섹터 전체 초기화 후 재탐색 (API+AI)",
             key="analysis_reset_refill_company_meta_btn",
+        )
+    with meta_btn_col3:
+        refresh_price_btn = st.button(
+            "현재 주가 일괄 불러오기 (API+AI)",
+            key="analysis_fill_company_price_btn",
         )
 
     if auto_fill_missing_btn:
