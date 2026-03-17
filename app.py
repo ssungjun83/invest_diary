@@ -141,9 +141,36 @@ def clean_valid_ticker(value: str) -> str:
     ticker = normalize_ticker_text(value)
     if not ticker:
         return ""
+    # Reuters 표기(예: AGNC.O, IBM.N)는 Yahoo 표기로 정규화한다.
+    m_reuters_us = re.fullmatch(r"([A-Z][A-Z0-9\-]{0,9})\.(O|N)", ticker)
+    if m_reuters_us:
+        ticker = m_reuters_us.group(1)
     if ticker.startswith("."):
         return ""
     if ticker in {"KS", "KQ"}:
+        return ""
+    if ticker in {
+        "UNKNOWN",
+        "NONE",
+        "NULL",
+        "N/A",
+        "NA",
+        "STOCK",
+        "TICKER",
+        "SYMBOL",
+        "COMPANY",
+        "SHARE",
+        "NYSE",
+        "NASDAQ",
+        "KOSPI",
+        "KOSDAQ",
+    }:
+        return ""
+    # ISIN(예: US20080516001)은 티커가 아니다.
+    if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", ticker):
+        return ""
+    # 점/구분자 없는 비정상 장문 코드는 오탐 가능성이 높아 차단한다.
+    if "." not in ticker and "-" not in ticker and "^" not in ticker and "=" not in ticker and len(ticker) > 7:
         return ""
     if len(ticker) > 24:
         return ""
@@ -2075,14 +2102,14 @@ def _build_ticker_from_naver_item(item: dict) -> str:
     nation_code = str(item.get("nationCode") or "").strip().upper()
     url = str(item.get("url") or "").strip().lower()
 
-    if nation_code == "KOR" and re.fullmatch(r"\d{6}", code or ""):
-        suffix = ".KQ" if type_code == "KOSDAQ" else ".KS"
-        return f"{code}{suffix}"
-    if re.fullmatch(r"\d{6}", code or "") and "/domestic/stock/" in url:
-        suffix = ".KQ" if type_code == "KOSDAQ" else ".KS"
-        return f"{code}{suffix}"
+    is_domestic = nation_code == "KOR" or "/domestic/stock/" in url
+    if is_domestic:
+        base = clean_valid_ticker(code or reuters)
+        if re.fullmatch(r"[0-9A-Z]{6}", base or ""):
+            suffix = ".KQ" if type_code == "KOSDAQ" else ".KS"
+            return f"{base}{suffix}"
     if nation_code == "USA":
-        return clean_valid_ticker(reuters or code)
+        return clean_valid_ticker(code or reuters)
     return clean_valid_ticker(reuters or code)
 
 
@@ -2139,6 +2166,209 @@ def search_ticker_naver(company_name: str, market_preference: str = "") -> tuple
     if not candidates:
         return "", err
     return choose_best_ticker_candidate(name, candidates, "Naver증권", market_preference=market_preference)
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def _resolve_krx_code_to_yahoo_ticker(code: str) -> str:
+    raw = normalize_ticker_text(code)
+    if not re.fullmatch(r"[0-9A-Z]{6}", raw or ""):
+        return ""
+    try:
+        resp = requests.get(
+            "https://ac.stock.naver.com/ac",
+            params={"q": raw, "target": "stock"},
+            headers=HTTP_HEADERS_COMMON,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    except Exception:
+        return f"{raw}.KS"
+    items = payload.get("items") or []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        nation = str(item.get("nationCode") or "").strip().upper()
+        code_item = normalize_ticker_text(str(item.get("code") or ""))
+        reuters = normalize_ticker_text(str(item.get("reutersCode") or ""))
+        if nation != "KOR":
+            continue
+        if raw not in {code_item, reuters}:
+            continue
+        type_code = str(item.get("typeCode") or "").strip().upper()
+        suffix = ".KQ" if type_code == "KOSDAQ" else ".KS"
+        return f"{raw}{suffix}"
+    return f"{raw}.KS"
+
+
+def _normalize_external_ticker_candidate(raw_symbol: str) -> str:
+    raw = normalize_ticker_text(raw_symbol)
+    if not raw:
+        return ""
+    # Reuters 접미(.O/.N)를 Yahoo 표기로 변환
+    m_reuters_us = re.fullmatch(r"([A-Z][A-Z0-9\-]{0,9})\.(O|N)", raw)
+    if m_reuters_us:
+        raw = m_reuters_us.group(1)
+    # 국내 6자리(숫자+문자 포함) 코드는 Yahoo 접미를 보강
+    if "." not in raw and re.fullmatch(r"[0-9A-Z]{6}", raw) and any(ch.isdigit() for ch in raw):
+        return _resolve_krx_code_to_yahoo_ticker(raw)
+    return clean_valid_ticker(raw)
+
+
+def _extract_toss_ticker_candidates_from_web_text(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    decoded = unquote(unquote(raw))
+    corpus = f"{raw}\n{decoded}"
+    candidates = []
+    for m in re.finditer(r"(?:www\.)?tossinvest\.com/stocks/([A-Za-z0-9.\-]{1,24})", corpus, re.I):
+        cand = _normalize_external_ticker_candidate(m.group(1))
+        if cand:
+            candidates.append(cand)
+    uniq = []
+    seen = set()
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        uniq.append(c)
+    return uniq
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _search_ticker_toss_candidates(company_name: str) -> tuple[list[dict], str]:
+    name = (company_name or "").strip()
+    if not name:
+        return [], "기업명이 비어 있습니다."
+    queries = [
+        f"site:tossinvest.com/stocks {name}",
+        f"{name} tossinvest stock",
+    ]
+    score_map: dict[str, float] = {}
+    info_map: dict[str, dict] = {}
+    errs = []
+    for q_idx, q in enumerate(queries):
+        try:
+            resp = requests.get(
+                "https://search.yahoo.com/search",
+                params={"p": q},
+                headers=HTTP_HEADERS_COMMON,
+                timeout=12,
+            )
+            resp.raise_for_status()
+            hits = _extract_toss_ticker_candidates_from_web_text(resp.text or "")
+            for rank, ticker in enumerate(hits):
+                score = 5.8 - q_idx - (rank * 0.2)
+                if ticker not in score_map or score > score_map[ticker]:
+                    score_map[ticker] = score
+                    info_map[ticker] = {
+                        "symbol": ticker,
+                        "name": "",
+                        "exchange": "TOSS",
+                        "region": "",
+                    }
+        except Exception as exc:
+            errs.append(str(exc))
+    if not score_map:
+        return [], (" / ".join(errs[:2]) if errs else "Toss 웹검색 결과가 없습니다.")
+    ordered = sorted(score_map.keys(), key=lambda t: score_map[t], reverse=True)
+    return [info_map[t] for t in ordered], ""
+
+
+def search_ticker_toss(company_name: str, market_preference: str = "") -> tuple[str, str]:
+    name = (company_name or "").strip()
+    if not name:
+        return "", "기업명이 비어 있습니다."
+    candidates, err = _search_ticker_toss_candidates(name)
+    if not candidates:
+        return "", f"Toss 검색 실패: {err}"
+    return choose_best_ticker_candidate(name, candidates, "Toss웹검색", market_preference=market_preference)
+
+
+def _extract_google_finance_ticker_candidates_from_web_text(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    decoded = unquote(unquote(raw))
+    corpus = f"{raw}\n{decoded}"
+    candidates = []
+    for m in re.finditer(
+        r"google\.com/finance/quote/([A-Za-z0-9.\-]{1,24}):([A-Za-z0-9.\-]{1,20})",
+        corpus,
+        re.I,
+    ):
+        symbol = normalize_ticker_text(m.group(1))
+        exch = normalize_ticker_text(m.group(2))
+        picked = ""
+        if exch in {"NASDAQ", "NYSE", "AMEX", "OTCMKTS", "OTC"}:
+            picked = _normalize_external_ticker_candidate(symbol)
+        elif exch in {"KOSDAQ"} and re.fullmatch(r"[0-9A-Z]{6}", symbol):
+            picked = f"{symbol}.KQ"
+        elif exch in {"KRX", "KOSPI"} and re.fullmatch(r"[0-9A-Z]{6}", symbol):
+            picked = _resolve_krx_code_to_yahoo_ticker(symbol)
+        if not picked:
+            picked = _normalize_external_ticker_candidate(symbol)
+        if picked:
+            candidates.append(picked)
+    uniq = []
+    seen = set()
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        uniq.append(c)
+    return uniq
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _search_ticker_google_candidates(company_name: str) -> tuple[list[dict], str]:
+    name = (company_name or "").strip()
+    if not name:
+        return [], "기업명이 비어 있습니다."
+    queries = [
+        f"site:google.com/finance/quote {name}",
+        f"{name} google finance quote",
+    ]
+    score_map: dict[str, float] = {}
+    info_map: dict[str, dict] = {}
+    errs = []
+    for q_idx, q in enumerate(queries):
+        try:
+            resp = requests.get(
+                "https://search.yahoo.com/search",
+                params={"p": q},
+                headers=HTTP_HEADERS_COMMON,
+                timeout=12,
+            )
+            resp.raise_for_status()
+            hits = _extract_google_finance_ticker_candidates_from_web_text(resp.text or "")
+            for rank, ticker in enumerate(hits):
+                score = 5.5 - q_idx - (rank * 0.22)
+                if ticker not in score_map or score > score_map[ticker]:
+                    score_map[ticker] = score
+                    info_map[ticker] = {
+                        "symbol": ticker,
+                        "name": "",
+                        "exchange": "GOOGLE",
+                        "region": "",
+                    }
+        except Exception as exc:
+            errs.append(str(exc))
+    if not score_map:
+        return [], (" / ".join(errs[:2]) if errs else "Google 웹검색 결과가 없습니다.")
+    ordered = sorted(score_map.keys(), key=lambda t: score_map[t], reverse=True)
+    return [info_map[t] for t in ordered], ""
+
+
+def search_ticker_google(company_name: str, market_preference: str = "") -> tuple[str, str]:
+    name = (company_name or "").strip()
+    if not name:
+        return "", "기업명이 비어 있습니다."
+    candidates, err = _search_ticker_google_candidates(name)
+    if not candidates:
+        return "", f"Google 검색 실패: {err}"
+    return choose_best_ticker_candidate(name, candidates, "GoogleFinance웹검색", market_preference=market_preference)
 
 
 def search_ticker_alpha_vantage(company_name: str, api_key: str, market_preference: str = "") -> tuple[str, str]:
@@ -2614,34 +2844,51 @@ def resolve_ticker_auto(
     if builtin and _ticker_matches_market_preference(builtin, pref):
         return builtin, "내장 힌트"
 
-    # 한국기업 탐색 정확도를 위해 네이버증권을 최우선으로 시도한다.
-    # 시장 선호가 비어 있고 한글 기업명이면 국내를 우선 시도한 뒤, 실패 시 일반 탐색으로 재시도한다.
+    nv_ticker = ""
+    nv_source = ""
     naver_pref = pref or ("domestic" if has_hangul_name else "")
-    nv_ticker, nv_source = search_ticker_naver(name, market_preference=naver_pref)
-    if (
-        not nv_ticker
-        and not pref
-        and naver_pref == "domestic"
-    ):
-        nv_ticker_any, nv_source_any = search_ticker_naver(name, market_preference="")
-        if nv_ticker_any:
-            nv_ticker, nv_source = nv_ticker_any, nv_source_any
-        elif nv_source_any:
-            nv_source = " | ".join([m for m in [nv_source, nv_source_any] if m])
-    if nv_ticker and _ticker_matches_market_preference(nv_ticker, naver_pref or pref):
-        return nv_ticker, nv_source
+    run_naver_first = has_hangul_name or _market_pref_normalized(pref) == "domestic" or not pref
+    if run_naver_first:
+        # 한국기업 탐색 정확도를 위해 네이버증권을 우선 시도한다.
+        # 시장 선호가 비어 있고 한글 기업명이면 국내를 우선 시도한 뒤, 실패 시 일반 탐색으로 재시도한다.
+        nv_ticker, nv_source = search_ticker_naver(name, market_preference=naver_pref)
+        if (
+            not nv_ticker
+            and not pref
+            and naver_pref == "domestic"
+        ):
+            nv_ticker_any, nv_source_any = search_ticker_naver(name, market_preference="")
+            if nv_ticker_any:
+                nv_ticker, nv_source = nv_ticker_any, nv_source_any
+            elif nv_source_any:
+                nv_source = " | ".join([m for m in [nv_source, nv_source_any] if m])
+        if nv_ticker and _ticker_matches_market_preference(nv_ticker, naver_pref or pref):
+            return nv_ticker, nv_source
 
     saved = clean_valid_ticker(get_saved_ticker_hint(name))
     if saved and _ticker_matches_market_preference(saved, pref):
         return saved, "기존 저장 이력"
 
-    web_ticker, web_source = search_ticker_web_first(name, market_preference=market_preference)
-    if web_ticker and _ticker_matches_market_preference(web_ticker, pref):
-        return web_ticker, web_source
-
     yf_ticker, yf_source = search_ticker_yfinance(name, market_preference=market_preference)
     if yf_ticker and _ticker_matches_market_preference(yf_ticker, pref):
         return yf_ticker, yf_source
+
+    if not run_naver_first:
+        nv_ticker, nv_source = search_ticker_naver(name, market_preference=market_preference)
+        if nv_ticker and _ticker_matches_market_preference(nv_ticker, pref):
+            return nv_ticker, nv_source
+
+    google_ticker, google_source = search_ticker_google(name, market_preference=market_preference)
+    if google_ticker and _ticker_matches_market_preference(google_ticker, pref):
+        return google_ticker, google_source
+
+    toss_ticker, toss_source = search_ticker_toss(name, market_preference=market_preference)
+    if toss_ticker and _ticker_matches_market_preference(toss_ticker, pref):
+        return toss_ticker, toss_source
+
+    web_ticker, web_source = search_ticker_web_first(name, market_preference=market_preference)
+    if web_ticker and _ticker_matches_market_preference(web_ticker, pref):
+        return web_ticker, web_source
 
     sec_ticker = ""
     sec_source = ""
@@ -2680,7 +2927,19 @@ def resolve_ticker_auto(
         ai_source_msg = ai_source or "AI 시장선호 조건 불일치"
 
     fallback_msgs = [
-        msg for msg in [ai_source_msg, nv_source, web_source, yf_source, sec_source, alpha_source, fin_source] if msg
+        msg
+        for msg in [
+            ai_source_msg,
+            nv_source,
+            yf_source,
+            google_source,
+            toss_source,
+            web_source,
+            sec_source,
+            alpha_source,
+            fin_source,
+        ]
+        if msg
     ]
     return "", " | ".join(fallback_msgs) if fallback_msgs else "티커 자동 탐색에 실패했습니다."
 
