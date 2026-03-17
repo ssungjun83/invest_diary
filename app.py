@@ -5947,9 +5947,13 @@ def infer_market_preference_from_row(stock_name: str, currency: str = "", ticker
         return "foreign"
     if "ADR" in upper_name:
         return "foreign"
+    if _company_name_has_hangul(name):
+        if _looks_explicit_foreign_company_name(name):
+            return "foreign"
+        return "domestic"
     if re.search(r"[A-Z]{2,}", upper_name):
         return "foreign"
-    # 한글명만으로 국내를 단정하면 해외기업(한글 표기) 오탐이 많아 미분류로 둔다.
+    # 한글명이 없고 단서도 없으면 미분류.
     return ""
 
 
@@ -7602,6 +7606,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             next_ticker = current_ticker
             next_sector = current_sector
             market_pref = market_pref_map.get(company_name, "")
+            if _company_name_has_hangul(company_name) and not _looks_explicit_foreign_company_name(company_name):
+                market_pref = "domestic"
             if not market_pref:
                 if row_ticker:
                     market_pref = "domestic" if (row_ticker.endswith(".KS") or row_ticker.endswith(".KQ")) else "foreign"
