@@ -7833,6 +7833,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.success(st.session_state.pop("analysis_bulk_selected_reset_notice"))
     if "analysis_bulk_selected_reset_warning" in st.session_state:
         st.warning(st.session_state.pop("analysis_bulk_selected_reset_warning"))
+    if "analysis_bulk_selected_save_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_bulk_selected_save_notice"))
+    if "analysis_bulk_selected_save_warning" in st.session_state:
+        st.warning(st.session_state.pop("analysis_bulk_selected_save_warning"))
 
     if overview_rows:
         st.caption("목록에서 기업 행을 선택하면 아래 기업명/티커 입력이 자동 선택됩니다.")
@@ -7874,13 +7878,18 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         selected_names = list(dict.fromkeys(selected_names))
         st.session_state["analysis_selected_overview_names"] = selected_names
 
-        sel_col1, sel_col2 = st.columns([1.2, 2.2])
+        sel_col1, sel_col2, sel_col3 = st.columns([1.25, 1.05, 1.5])
         with sel_col1:
             reset_selected_btn = st.button(
                 "선택 항목 초기화 후 재탐색 (API+AI)",
                 key="analysis_reset_refill_selected_company_meta_btn",
             )
         with sel_col2:
+            save_selected_btn = st.button(
+                "선택 항목 수동 저장",
+                key="analysis_save_selected_company_meta_btn",
+            )
+        with sel_col3:
             st.caption(f"현재 선택: {len(selected_names):,}개")
 
         if reset_selected_btn:
@@ -7910,6 +7919,47 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     tail = f" 외 {remain}개" if remain > 0 else ""
                     st.session_state["analysis_bulk_selected_reset_warning"] = (
                         f"선택 항목 중 일부는 여전히 미완성입니다: {preview}{tail}"
+                    )
+                st.rerun()
+
+        if save_selected_btn:
+            if not selected_rows:
+                st.warning("먼저 표에서 기업을 1개 이상 체크해 주세요.")
+            else:
+                saved_count = 0
+                skipped: list[str] = []
+                for idx in selected_rows:
+                    try:
+                        row_idx = int(idx)
+                    except Exception:
+                        continue
+                    if not (0 <= row_idx < len(overview_df)):
+                        continue
+                    row_view = overview_df.iloc[row_idx]
+                    company_name = str(row_view.get("기업명") or "").strip()
+                    ticker = clean_valid_ticker(str(row_view.get("티커") or ""))
+                    sector = str(row_view.get("산업섹터") or "").strip()
+                    if not company_name:
+                        continue
+                    if not ticker and not sector:
+                        skipped.append(company_name)
+                        continue
+                    upsert_company_list_entry(
+                        company_name,
+                        ticker=ticker,
+                        sector=sector,
+                        source="manual_save_selected",
+                    )
+                    saved_count += 1
+                st.session_state["analysis_bulk_selected_save_notice"] = (
+                    f"선택 항목 저장 완료: {saved_count}개"
+                )
+                if skipped:
+                    preview = ", ".join(skipped[:6])
+                    remain = len(skipped) - min(6, len(skipped))
+                    tail = f" 외 {remain}개" if remain > 0 else ""
+                    st.session_state["analysis_bulk_selected_save_warning"] = (
+                        f"티커/섹터가 비어 저장하지 못한 항목: {preview}{tail}"
                     )
                 st.rerun()
 
