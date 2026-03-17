@@ -2473,6 +2473,9 @@ def normalize_ai_provider(provider: str) -> str:
 
 
 def ai_provider_label(provider: str) -> str:
+    p = (provider or "").strip().lower()
+    if p == "template":
+        return "Template"
     return "Claude" if normalize_ai_provider(provider) == "claude" else "OpenAI"
 
 
@@ -3586,8 +3589,8 @@ def extract_company_watchlist_from_image_with_ai(
 
 
 def fetch_company_metrics_from_yfinance(ticker: str) -> tuple[dict, str, str]:
-    ticker = (ticker or "").strip()
-    if not ticker:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
         return {}, "", "티커를 입력해 주세요."
 
     try:
@@ -3596,7 +3599,7 @@ def fetch_company_metrics_from_yfinance(ticker: str) -> tuple[dict, str, str]:
         return {}, "", "yfinance 패키지가 없어 자동 불러오기를 사용할 수 없습니다."
 
     try:
-        info = yf.Ticker(ticker).info or {}
+        info = yf.Ticker(tkr).info or {}
     except Exception as exc:
         return {}, "", f"데이터 불러오기 실패: {exc}"
 
@@ -4114,8 +4117,8 @@ def fetch_company_financial_summary_from_google_finance(ticker: str) -> tuple[di
 
 
 def fetch_company_financial_summary_from_yfinance(ticker: str) -> tuple[dict, str]:
-    ticker = (ticker or "").strip()
-    if not ticker:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
         return {}, "티커가 비어 있습니다."
 
     try:
@@ -4124,7 +4127,7 @@ def fetch_company_financial_summary_from_yfinance(ticker: str) -> tuple[dict, st
         return {}, "yfinance 패키지를 찾을 수 없습니다."
 
     try:
-        obj = yf.Ticker(ticker)
+        obj = yf.Ticker(tkr)
         info = obj.info or {}
     except Exception as exc:
         return {}, f"yfinance 조회 실패: {exc}"
@@ -4539,6 +4542,146 @@ def fetch_company_financial_summary_multi_source(ticker: str) -> tuple[dict, str
     return {}, " | ".join(uniq_errs) if uniq_errs else "기업 재무 정보를 불러오지 못했습니다.", ""
 
 
+def _financial_summary_quality_score(summary: dict) -> int:
+    if not isinstance(summary, dict) or not summary:
+        return 0
+    score = 0
+    core_keys = [
+        "name",
+        "sector",
+        "industry",
+        "country",
+        "market_cap",
+        "enterprise_value",
+        "total_revenue",
+        "ebitda",
+        "trailing_pe",
+        "price_to_book",
+        "revenue_growth_pct",
+        "roe_pct",
+        "business_summary",
+    ]
+    for key in core_keys:
+        if not _is_missing_summary_value(summary.get(key)):
+            score += 1
+    for key in ["income_statement_annual", "balance_sheet_annual", "cashflow_annual"]:
+        value = summary.get(key)
+        if isinstance(value, list) and value:
+            score += 2
+    return score
+
+
+def _collect_analysis_ticker_candidates(
+    company_name: str,
+    ticker_input: str,
+    use_ai_ticker: bool,
+    ai_provider: str,
+    ai_api_key: str,
+    ai_model: str,
+    market_preference: str = "",
+) -> tuple[list[str], list[str]]:
+    name = (company_name or "").strip()
+    raw_ticker = (ticker_input or "").strip()
+    pref = _market_pref_normalized(market_preference)
+    candidates: list[str] = []
+    notes: list[str] = []
+
+    def add_candidate(value: str, reason: str) -> None:
+        tkr = clean_valid_ticker(value)
+        if pref and not _ticker_matches_market_preference(tkr, pref):
+            return
+        if not tkr or tkr in candidates:
+            return
+        candidates.append(tkr)
+        notes.append(f"{reason}:{tkr}")
+
+    add_candidate(raw_ticker, "입력")
+    normalized_external = _normalize_external_ticker_candidate(raw_ticker)
+    if normalized_external and normalized_external != clean_valid_ticker(raw_ticker):
+        add_candidate(normalized_external, "입력정규화")
+
+    if name:
+        saved_hint = clean_valid_ticker(get_company_list_ticker(name))
+        if saved_hint:
+            add_candidate(saved_hint, "리스트저장값")
+
+        auto_ticker, auto_src = resolve_ticker_auto_with_retry(
+            name,
+            use_ai=bool(use_ai_ticker),
+            api_key=ai_api_key,
+            model=ai_model,
+            provider=ai_provider,
+            market_preference=market_preference,
+        )
+        if auto_ticker:
+            add_candidate(auto_ticker, f"자동탐색({auto_src or 'source'})")
+    return candidates, notes
+
+
+def fetch_company_financial_summary_for_analysis(
+    company_name: str,
+    ticker_input: str,
+    use_ai_ticker: bool,
+    ai_provider: str,
+    ai_api_key: str,
+    ai_model: str,
+    market_preference: str = "",
+) -> tuple[str, dict, str, str]:
+    candidates, notes = _collect_analysis_ticker_candidates(
+        company_name=company_name,
+        ticker_input=ticker_input,
+        use_ai_ticker=use_ai_ticker,
+        ai_provider=ai_provider,
+        ai_api_key=ai_api_key,
+        ai_model=ai_model,
+        market_preference=market_preference,
+    )
+    if not candidates:
+        return "", {}, "", "유효한 티커를 찾지 못했습니다."
+
+    best_ticker = ""
+    best_summary: dict = {}
+    best_source = ""
+    best_score = -1.0
+    errs: list[str] = []
+
+    for cand in candidates:
+        summary, err, source = fetch_company_financial_summary_multi_source(cand)
+        score = float(_financial_summary_quality_score(summary))
+        if summary:
+            ref_name = str(summary.get("name") or cand).strip()
+            sim = _name_similarity(company_name, ref_name) if company_name else 0.0
+            score += sim * 3.0
+        if summary and score > best_score:
+            best_score = score
+            best_ticker = cand
+            best_summary = dict(summary)
+            best_source = source or "multi_source"
+        if err:
+            errs.append(f"{cand}: {err}")
+
+    tried_text = ", ".join(candidates)
+    route_text = " -> ".join(notes) if notes else tried_text
+    if best_summary:
+        source_text = f"{best_source} | 시도: {tried_text}"
+        if route_text:
+            source_text = f"{source_text} | 경로: {route_text}"
+        return best_ticker, best_summary, source_text, ""
+
+    uniq_errs = []
+    seen = set()
+    for msg in errs:
+        m = str(msg or "").strip()
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        uniq_errs.append(m)
+    err_text = " | ".join(uniq_errs[:6]) if uniq_errs else "기업 재무 정보를 불러오지 못했습니다."
+    if tried_text:
+        err_text = f"{err_text} | 시도 티커: {tried_text}"
+    return candidates[0], {}, "", err_text
+
+
 def _lines_to_text(value) -> str:
     if value is None:
         return ""
@@ -4600,6 +4743,94 @@ def generate_company_analysis_with_ai(
         "key_takeaway": _lines_to_text(parsed.get("key_takeaway")),
     }
     return analysis, ""
+
+
+def _fmt_num_brief(value) -> str:
+    num = _safe_to_float(value)
+    if num is None:
+        return "데이터 없음"
+    abs_num = abs(num)
+    if abs_num >= 1_000_000_000_000:
+        return f"{num / 1_000_000_000_000:.2f}T"
+    if abs_num >= 1_000_000_000:
+        return f"{num / 1_000_000_000:.2f}B"
+    if abs_num >= 1_000_000:
+        return f"{num / 1_000_000:.2f}M"
+    return f"{num:,.0f}"
+
+
+def _fmt_pct_brief(value) -> str:
+    num = _safe_to_float(value)
+    if num is None:
+        return "데이터 없음"
+    return f"{num:.2f}%"
+
+
+def generate_company_analysis_template(company_name: str, ticker: str, financial_summary: dict) -> dict:
+    summary = financial_summary if isinstance(financial_summary, dict) else {}
+    name = str(summary.get("name") or company_name or ticker or "해당 기업").strip()
+    tkr = clean_valid_ticker(ticker)
+    sector = str(summary.get("sector") or summary.get("industry") or "미분류").strip()
+    country = str(summary.get("country") or "").strip()
+
+    market_cap_text = _fmt_num_brief(summary.get("market_cap"))
+    revenue_text = _fmt_num_brief(summary.get("total_revenue"))
+    rev_growth_text = _fmt_pct_brief(summary.get("revenue_growth_pct"))
+    roe_text = _fmt_pct_brief(summary.get("roe_pct"))
+    pe_text = _fmt_num_brief(summary.get("trailing_pe"))
+    pb_text = _fmt_num_brief(summary.get("price_to_book"))
+    debt_text = _fmt_num_brief(summary.get("debt_to_equity"))
+
+    base_overview = [
+        f"{name}({tkr or '티커 미확정'})는 {sector} 섹터 기업입니다."
+    ]
+    if country:
+        base_overview.append(f"주요 상장/사업 국가는 {country}입니다.")
+    base_overview.append(f"시가총액 추정치는 {market_cap_text}, 최근 매출 규모는 {revenue_text}입니다.")
+    if not _is_missing_summary_value(summary.get("business_summary")):
+        base_overview.append("사업 개요는 확보된 재무 데이터의 회사 설명을 반영했습니다.")
+    else:
+        base_overview.append("세부 사업설명은 추가 공시/IR 자료 확인이 필요합니다.")
+
+    products = [
+        f"{sector} 중심의 핵심 제품/서비스 포트폴리오",
+        "기존 주력 제품의 점유율 유지 전략",
+        "신규 시장 확장을 위한 제품 다각화",
+        "가격/원가/환율 변화에 대응하는 운영 전략",
+    ]
+    raw_materials = [
+        "원재료/부품 조달 단가",
+        "인건비 및 운영비",
+        "물류비/운송비",
+        "환율 및 금리 조건",
+    ]
+    up_factors = [
+        f"매출 성장률 개선 시 긍정 효과 ({rev_growth_text})",
+        f"수익성 지표 개선 여지 (ROE {roe_text})",
+        "주력 사업 수요 회복 또는 점유율 확대",
+        "원가 안정화 및 운영 효율화",
+        "신규 고객/시장 확장",
+    ]
+    down_factors = [
+        f"밸류에이션 부담 가능성 (PER {pe_text}, PBR {pb_text})",
+        f"재무 레버리지 부담 (부채비율/유사 지표 {debt_text})",
+        "경기 둔화에 따른 수요 감소",
+        "원자재/환율 변동성 확대",
+        "규제/정책 변화 리스크",
+    ]
+    takeaway = [
+        f"{name}는 {sector} 내에서 실적과 밸류에이션의 균형 점검이 필요한 기업입니다.",
+        "정량 지표 확인 후 분기 실적과 가이던스 변화 중심으로 추적하는 접근이 유효합니다.",
+    ]
+
+    return {
+        "company_overview": _lines_to_text(base_overview),
+        "products_services": _lines_to_text(products),
+        "raw_materials": _lines_to_text(raw_materials),
+        "profit_up_factors": _lines_to_text(up_factors),
+        "profit_down_factors": _lines_to_text(down_factors),
+        "key_takeaway": _lines_to_text(takeaway),
+    }
 
 
 def save_company_analysis(
@@ -7661,6 +7892,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     st.markdown("##### AI 옵션")
     st.checkbox("yfinance 티커 검색 실패 시 AI 티커 추론 사용", key="analysis_use_ai_ticker")
     st.caption("AI 키/모델/제공자는 API 설정 탭의 공통값을 사용합니다.")
+    st.caption("기업분석 탐색원: (국내) Naver -> yfinance -> Google -> Toss -> Alpha/Finnhub, (해외) yfinance -> Naver -> Google -> Toss -> Alpha/Finnhub")
 
     c1, c2, c3, c4 = st.columns([1, 1.3, 1.1, 1.2])
     with c1:
@@ -7684,7 +7916,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 st.rerun()
 
     analysis_company_name_value = (st.session_state.get("analysis_company_name_input") or "").strip()
-    analysis_ticker_value = clean_valid_ticker(st.session_state.get("analysis_ticker_input") or "")
+    analysis_ticker_raw = _sanitize_widget_text(st.session_state.get("analysis_ticker_input"), "")
+    analysis_ticker_value = clean_valid_ticker(analysis_ticker_raw)
+    if analysis_ticker_raw and analysis_ticker_value and analysis_ticker_raw != analysis_ticker_value:
+        st.session_state["analysis_ticker_input"] = analysis_ticker_value
     st.session_state["analysis_company_name"] = analysis_company_name_value
     st.session_state["analysis_ticker"] = analysis_ticker_value
 
@@ -7787,31 +8022,32 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         if not company_name:
             st.error("기업명을 입력해 주세요.")
         else:
-            ticker = analysis_ticker_value
-            if not ticker:
-                tkr, src = resolve_ticker_auto_with_retry(
-                    company_name,
-                    use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
-                    api_key=analysis_ai_api_key,
-                    model=analysis_ai_model,
-                    provider=analysis_ai_provider,
-                    market_preference=market_pref_map.get(company_name, ""),
-                )
-                if tkr:
-                    st.session_state["analysis_ticker_pending"] = tkr
-                    st.session_state["analysis_ticker_source"] = src
-                    ticker = tkr
-                else:
-                    st.error(src or "티커를 자동 추론하지 못했습니다.")
-                    ticker = ""
+            ticker, financial_summary, financial_source, financial_error = fetch_company_financial_summary_for_analysis(
+                company_name=company_name,
+                ticker_input=analysis_ticker_value,
+                use_ai_ticker=bool(st.session_state.get("analysis_use_ai_ticker", False)),
+                ai_provider=analysis_ai_provider,
+                ai_api_key=analysis_ai_api_key,
+                ai_model=analysis_ai_model,
+                market_preference=market_pref_map.get(company_name, ""),
+            )
+            ticker = clean_valid_ticker(ticker)
+            if ticker and ticker != analysis_ticker_value:
+                st.session_state["analysis_ticker_pending"] = ticker
+                st.session_state["analysis_ticker_source"] = "기업분석 재탐색"
 
-            if ticker:
-                financial_summary, financial_error, financial_source = fetch_company_financial_summary_multi_source(ticker)
-                if financial_error:
-                    st.warning(financial_error)
-                if financial_summary:
-                    st.session_state["analysis_financial_summary_cache"] = financial_summary
-                    st.caption(f"재무 데이터 소스: {financial_source}")
+            if financial_error:
+                st.warning(financial_error)
+            if financial_summary:
+                st.session_state["analysis_financial_summary_cache"] = financial_summary
+                st.caption(f"재무 데이터 소스: {financial_source}")
+
+            used_ai_provider = normalize_ai_provider(analysis_ai_provider)
+            used_ai_model = analysis_ai_model
+            analysis = {}
+            ai_err = ""
+
+            if (analysis_ai_api_key or "").strip():
                 analysis, ai_err = generate_company_analysis_with_ai(
                     company_name=company_name,
                     ticker=ticker,
@@ -7820,70 +8056,79 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     model=analysis_ai_model,
                     provider=analysis_ai_provider,
                 )
-                used_ai_provider = analysis_ai_provider
-                used_ai_model = analysis_ai_model
-                if ai_err:
-                    fallback_provider = "openai" if normalize_ai_provider(analysis_ai_provider) == "claude" else "claude"
-                    fallback_key = (
-                        st.session_state.get("global_openai_api_key", "")
-                        if fallback_provider == "openai"
-                        else st.session_state.get("global_claude_api_key", "")
-                    )
-                    fallback_model = (
-                        st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL)
-                        if fallback_provider == "openai"
-                        else st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL)
-                    )
-                    fallback_key = (fallback_key or "").strip()
-                    fallback_model = (fallback_model or "").strip()
-                    if fallback_key:
-                        st.warning(
-                            f"{ai_provider_label(analysis_ai_provider)} 호출 실패로 "
-                            f"{ai_provider_label(fallback_provider)} 모델로 1회 재시도합니다."
-                        )
-                        fallback_analysis, fallback_err = generate_company_analysis_with_ai(
-                            company_name=company_name,
-                            ticker=ticker,
-                            financial_summary=financial_summary,
-                            api_key=fallback_key,
-                            model=fallback_model,
-                            provider=fallback_provider,
-                        )
-                        if not fallback_err and fallback_analysis:
-                            analysis = fallback_analysis
-                            ai_err = ""
-                            used_ai_provider = fallback_provider
-                            used_ai_model = fallback_model
-                            st.caption(f"AI 생성 소스: {ai_provider_label(used_ai_provider)}")
-                        else:
-                            ai_err = f"{ai_err} | 대체 호출 실패: {fallback_err}"
+            else:
+                ai_err = "AI API 키가 없어 템플릿 기반으로 분석을 생성합니다."
 
-                if ai_err:
-                    st.error(ai_err)
-                else:
-                    st.session_state["analysis_company_overview"] = analysis.get("company_overview", "")
-                    st.session_state["analysis_products_services"] = analysis.get("products_services", "")
-                    st.session_state["analysis_raw_materials"] = analysis.get("raw_materials", "")
-                    st.session_state["analysis_profit_up_factors"] = analysis.get("profit_up_factors", "")
-                    st.session_state["analysis_profit_down_factors"] = analysis.get("profit_down_factors", "")
-                    st.session_state["analysis_key_takeaway"] = analysis.get("key_takeaway", "")
-                    save_company_analysis(
-                        analysis_date=st.session_state["analysis_date"],
-                        stock_name=company_name,
+            if ai_err and (analysis_ai_api_key or "").strip():
+                fallback_provider = "openai" if normalize_ai_provider(analysis_ai_provider) == "claude" else "claude"
+                fallback_key = (
+                    st.session_state.get("global_openai_api_key", "")
+                    if fallback_provider == "openai"
+                    else st.session_state.get("global_claude_api_key", "")
+                )
+                fallback_model = (
+                    st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL)
+                    if fallback_provider == "openai"
+                    else st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL)
+                )
+                fallback_key = (fallback_key or "").strip()
+                fallback_model = (fallback_model or "").strip()
+                if fallback_key:
+                    st.warning(
+                        f"{ai_provider_label(analysis_ai_provider)} 호출 실패로 "
+                        f"{ai_provider_label(fallback_provider)} 모델로 1회 재시도합니다."
+                    )
+                    fallback_analysis, fallback_err = generate_company_analysis_with_ai(
+                        company_name=company_name,
                         ticker=ticker,
                         financial_summary=financial_summary,
-                        analysis=analysis,
-                        source=f"ai:{used_ai_provider}",
-                        ai_model=f"{ai_provider_label(used_ai_provider)}:{used_ai_model}",
-                        note=analysis.get("key_takeaway", ""),
+                        api_key=fallback_key,
+                        model=fallback_model,
+                        provider=fallback_provider,
                     )
-                    upsert_company_list_entry(
-                        company_name,
-                        ticker,
-                        sector=(financial_summary.get("sector") or "") if isinstance(financial_summary, dict) else "",
-                        source="analysis",
-                    )
-                    st.success(f"{company_name} 기업 분석 생성/저장을 완료했습니다.")
+                    if not fallback_err and fallback_analysis:
+                        analysis = fallback_analysis
+                        ai_err = ""
+                        used_ai_provider = fallback_provider
+                        used_ai_model = fallback_model
+                        st.caption(f"AI 생성 소스: {ai_provider_label(used_ai_provider)}")
+                    else:
+                        ai_err = f"{ai_err} | 대체 호출 실패: {fallback_err}"
+
+            if ai_err:
+                st.warning(ai_err)
+                analysis = generate_company_analysis_template(
+                    company_name=company_name,
+                    ticker=ticker,
+                    financial_summary=financial_summary,
+                )
+                used_ai_provider = "template"
+                used_ai_model = "rule-based"
+                st.caption("AI 실패/미설정으로 템플릿 기반 분석을 생성했습니다.")
+
+            st.session_state["analysis_company_overview"] = analysis.get("company_overview", "")
+            st.session_state["analysis_products_services"] = analysis.get("products_services", "")
+            st.session_state["analysis_raw_materials"] = analysis.get("raw_materials", "")
+            st.session_state["analysis_profit_up_factors"] = analysis.get("profit_up_factors", "")
+            st.session_state["analysis_profit_down_factors"] = analysis.get("profit_down_factors", "")
+            st.session_state["analysis_key_takeaway"] = analysis.get("key_takeaway", "")
+            save_company_analysis(
+                analysis_date=st.session_state["analysis_date"],
+                stock_name=company_name,
+                ticker=ticker,
+                financial_summary=financial_summary,
+                analysis=analysis,
+                source=f"ai:{used_ai_provider}",
+                ai_model=f"{ai_provider_label(used_ai_provider)}:{used_ai_model}",
+                note=analysis.get("key_takeaway", ""),
+            )
+            upsert_company_list_entry(
+                company_name,
+                ticker,
+                sector=(financial_summary.get("sector") or "") if isinstance(financial_summary, dict) else "",
+                source="analysis",
+            )
+            st.success(f"{company_name} 기업 분석 생성/저장을 완료했습니다.")
 
     st.markdown("#### 기업 분석 내용")
     st.text_area("기업 개요", key="analysis_company_overview", height=110)
@@ -7900,27 +8145,26 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         if not company_name:
             st.error("기업명을 입력해 주세요.")
         else:
-            if not ticker:
-                tkr, src = resolve_ticker_auto_with_retry(
-                    company_name,
-                    use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
-                    api_key=analysis_ai_api_key,
-                    model=analysis_ai_model,
-                    provider=analysis_ai_provider,
-                    market_preference=market_pref_map.get(company_name, ""),
-                )
-                if tkr:
-                    st.session_state["analysis_ticker_pending"] = tkr
-                    ticker = tkr
-                    st.session_state["analysis_ticker_source"] = src
-            if ticker:
-                fetched_summary, fetched_err, fetched_source = fetch_company_financial_summary_multi_source(ticker)
-                if fetched_err:
-                    st.warning(f"재무제표 조회 경고: {fetched_err}")
-                if fetched_summary:
-                    financial_summary = fetched_summary
-                    st.session_state["analysis_financial_summary_cache"] = fetched_summary
-                    st.caption(f"재무 데이터 소스: {fetched_source}")
+            resolved_ticker, fetched_summary, fetched_source, fetched_err = fetch_company_financial_summary_for_analysis(
+                company_name=company_name,
+                ticker_input=ticker,
+                use_ai_ticker=bool(st.session_state.get("analysis_use_ai_ticker", False)),
+                ai_provider=analysis_ai_provider,
+                ai_api_key=analysis_ai_api_key,
+                ai_model=analysis_ai_model,
+                market_preference=market_pref_map.get(company_name, ""),
+            )
+            if resolved_ticker:
+                ticker = resolved_ticker
+                if ticker != analysis_ticker_value:
+                    st.session_state["analysis_ticker_pending"] = ticker
+                    st.session_state["analysis_ticker_source"] = "기업분석 재탐색"
+            if fetched_err:
+                st.warning(f"재무제표 조회 경고: {fetched_err}")
+            if fetched_summary:
+                financial_summary = fetched_summary
+                st.session_state["analysis_financial_summary_cache"] = fetched_summary
+                st.caption(f"재무 데이터 소스: {fetched_source}")
             save_company_analysis(
                 analysis_date=st.session_state["analysis_date"],
                 stock_name=company_name,
