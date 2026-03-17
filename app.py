@@ -5370,6 +5370,14 @@ def filter_history_by_period(hist_df: pd.DataFrame, period: str) -> pd.DataFrame
         start_date = end_date - pd.DateOffset(months=6)
     elif period == "1년":
         start_date = end_date - pd.DateOffset(years=1)
+    elif period == "2년":
+        start_date = end_date - pd.DateOffset(years=2)
+    elif period == "3년":
+        start_date = end_date - pd.DateOffset(years=3)
+    elif period == "5년":
+        start_date = end_date - pd.DateOffset(years=5)
+    elif period == "10년":
+        start_date = end_date - pd.DateOffset(years=10)
     else:
         return hist_df
 
@@ -5445,11 +5453,12 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
     if hist_df.empty:
         st.info("아직 저장된 스냅샷이 없어 자산 추이 그래프를 표시할 수 없습니다. 기록 입력 탭에서 먼저 저장해 주세요.")
     else:
+        period_options = ["1개월", "3개월", "6개월", "YTD", "1년", "2년", "3년", "5년", "10년", "전체"]
         period = st.radio(
             "조회 기간",
-            options=["1개월", "3개월", "6개월", "YTD", "1년", "전체"],
+            options=period_options,
             horizontal=True,
-            index=5,
+            index=period_options.index("전체"),
             key="dashboard_asset_period",
         )
         filtered_hist = filter_history_by_period(hist_df, period)
