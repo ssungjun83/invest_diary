@@ -5516,13 +5516,13 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         u_inv = float(unknown_row.iloc[0]["투자금액"]) if not unknown_row.empty else 0.0
         d_ratio = (d_val / group_total * 100.0) if group_total else 0.0
         f_ratio = (f_val / group_total * 100.0) if group_total else 0.0
-        total_dom_for_invest = d_inv + f_inv
+        total_dom_for_value = d_val + f_val
 
         g1, g2, g3, g4 = st.columns([1, 1, 1, 1.2])
         g1.metric("국내주식", format_won(d_val), f"투자금액 {d_inv:,.0f}원 | 비중 {d_ratio:,.0f}%")
         g2.metric("해외주식", format_won(f_val), f"투자금액 {f_inv:,.0f}원 | 비중 {f_ratio:,.0f}%")
         g3.metric("미분류", f"{u_cnt:,}", f"투자금액 {u_inv:,.0f}원")
-        g4.metric("국내외 합계 투자금액", format_won(total_dom_for_invest), "국내+해외 원금 합계")
+        g4.metric("국내외 합계 평가금액", format_won(total_dom_for_value), "국내+해외 평가금액 합계")
 
         split_col1, split_col2 = st.columns([1.25, 1])
         with split_col1:
