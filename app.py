@@ -169,6 +169,19 @@ def _market_pref_normalized(value: str) -> str:
     return ""
 
 
+def _ticker_matches_market_preference(ticker: str, market_preference: str) -> bool:
+    pref = _market_pref_normalized(market_preference)
+    tkr = clean_valid_ticker(ticker)
+    if not pref or not tkr:
+        return bool(tkr)
+    is_kr_ticker = tkr.endswith(".KS") or tkr.endswith(".KQ")
+    if pref == "foreign":
+        return not is_kr_ticker
+    if pref == "domestic":
+        return is_kr_ticker
+    return True
+
+
 def _name_similarity(query: str, candidate: str) -> float:
     q = normalize_company_name_for_match(query)
     c = normalize_company_name_for_match(candidate)
@@ -226,8 +239,32 @@ def choose_best_ticker_candidate(
     scored = []
     q_has_hangul = bool(re.search(r"[가-힣]", str(company_name or "")))
     q_norm = normalize_company_name_for_match(company_name)
-    for idx, cand in enumerate(candidates):
+
+    # 시장 선호가 명확할 때는 후보군 자체를 우선 필터링한다.
+    raw_pool = []
+    for cand in candidates:
         symbol = clean_valid_ticker(str(cand.get("symbol") or ""))
+        if not symbol:
+            continue
+        item = dict(cand)
+        item["_symbol"] = symbol
+        item["_is_kr_ticker"] = symbol.endswith(".KS") or symbol.endswith(".KQ")
+        raw_pool.append(item)
+
+    pool = raw_pool
+    if pref == "foreign":
+        non_kr = [c for c in raw_pool if not bool(c.get("_is_kr_ticker", False))]
+        if non_kr:
+            pool = non_kr
+    elif pref == "domestic":
+        only_kr = [c for c in raw_pool if bool(c.get("_is_kr_ticker", False))]
+        if only_kr:
+            pool = only_kr
+
+    for idx, cand in enumerate(pool):
+        symbol = str(cand.get("_symbol") or "").strip()
+        if not symbol:
+            symbol = clean_valid_ticker(str(cand.get("symbol") or ""))
         if not symbol:
             continue
         display_name = str(cand.get("name") or cand.get("description") or "").strip()
@@ -259,7 +296,15 @@ def choose_best_ticker_candidate(
             elif is_other_foreign:
                 score -= 0.04
         score = max(0.0, min(1.0, score))
-        scored.append({"symbol": symbol, "name": display_name, "score": score, "sim": sim})
+        scored.append(
+            {
+                "symbol": symbol,
+                "name": display_name,
+                "score": score,
+                "sim": sim,
+                "is_kr_ticker": is_kr_ticker,
+            }
+        )
 
     if not scored:
         return "", f"{provider_label} 유효 티커 결과가 없습니다."
@@ -271,6 +316,17 @@ def choose_best_ticker_candidate(
     if pref:
         threshold = max(threshold, 0.36)
     ambiguous = (best["score"] - second_score) < 0.05 and best["score"] < 0.60
+    # 한글 이름 + 시장 미분류에서는 국내(.KS/.KQ)와 해외 후보가 비슷하면 자동확정을 피한다.
+    if (not pref) and q_has_hangul and bool(best.get("is_kr_ticker", False)):
+        non_kr_sorted = [r for r in scored if not bool(r.get("is_kr_ticker", False))]
+        if non_kr_sorted:
+            best_non_kr = non_kr_sorted[0]
+            if best_non_kr["score"] >= max(0.48, best["score"] - 0.08):
+                return "", (
+                    f"{provider_label} 후보가 국내/해외로 경합합니다. "
+                    f"국내 {best['symbol']}({best['score']:.2f}) vs "
+                    f"해외 {best_non_kr['symbol']}({best_non_kr['score']:.2f})"
+                )
     if best["score"] < threshold or ambiguous:
         reason = f"최고 일치도 {best['score']:.2f}"
         if ambiguous:
@@ -807,7 +863,12 @@ def get_fx_tracker_summary(series_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def save_snapshot(snapshot_date: date, df: pd.DataFrame) -> None:
+def save_snapshot(
+    snapshot_date: date,
+    df: pd.DataFrame,
+    sync_to_github: bool = True,
+    sync_reason: str = "",
+) -> tuple[bool, str]:
     now_str = datetime.now().isoformat(timespec="seconds")
     date_str = snapshot_date.isoformat()
     usd_krw_rate, _ = get_usd_krw_rate_for_date(snapshot_date)
@@ -857,6 +918,18 @@ def save_snapshot(snapshot_date: date, df: pd.DataFrame) -> None:
         conn.commit()
     finally:
         conn.close()
+
+    if not sync_to_github:
+        return False, ""
+
+    sync_ok, sync_msg = sync_snapshot_to_github_excel(snapshot_date, df)
+    if sync_msg:
+        prefix = f"[{sync_reason}] " if sync_reason else ""
+        try:
+            st.session_state["github_sync_notice"] = prefix + sync_msg
+        except Exception:
+            pass
+    return sync_ok, sync_msg
 
 
 def empty_portfolio_df() -> pd.DataFrame:
@@ -1105,6 +1178,18 @@ def save_snapshot_cash(snapshot_date: date, cash_krw: float | None, cash_usd: fl
         conn.commit()
     finally:
         conn.close()
+
+    if not sync_to_github:
+        return False, ""
+
+    sync_ok, sync_msg = sync_snapshot_to_github_excel(snapshot_date, df)
+    if sync_msg:
+        prefix = f"[{sync_reason}] " if sync_reason else ""
+        try:
+            st.session_state["github_sync_notice"] = prefix + sync_msg
+        except Exception:
+            pass
+    return sync_ok, sync_msg
 
 
 def load_snapshot_cash(snapshot_date: date) -> tuple[float, float]:
@@ -1420,7 +1505,7 @@ def compute_company_metric_ranking(
             ticker = list_ticker
             ticker_source = "기업 리스트 저장값"
         else:
-            ticker, ticker_source = resolve_ticker_auto(
+            ticker, ticker_source = resolve_ticker_auto_with_retry(
                 company_name,
                 use_ai=use_ai_ticker,
                 api_key=ai_api_key,
@@ -1951,17 +2036,18 @@ def resolve_ticker_auto(
     name = (company_name or "").strip()
     if not name:
         return "", "기업명을 입력해 주세요."
+    pref = _market_pref_normalized(market_preference)
 
     builtin = get_builtin_ticker_hint(name)
-    if builtin:
+    if builtin and _ticker_matches_market_preference(builtin, pref):
         return builtin, "내장 힌트"
 
     saved = clean_valid_ticker(get_saved_ticker_hint(name))
-    if saved:
+    if saved and _ticker_matches_market_preference(saved, pref):
         return saved, "기존 저장 이력"
 
     yf_ticker, yf_source = search_ticker_yfinance(name, market_preference=market_preference)
-    if yf_ticker:
+    if yf_ticker and _ticker_matches_market_preference(yf_ticker, pref):
         return yf_ticker, yf_source
 
     alpha_key, finnhub_key = get_market_data_api_keys()
@@ -1969,11 +2055,11 @@ def resolve_ticker_auto(
     fin_source = ""
     if alpha_key:
         alpha_ticker, alpha_source = search_ticker_alpha_vantage(name, alpha_key, market_preference=market_preference)
-        if alpha_ticker:
+        if alpha_ticker and _ticker_matches_market_preference(alpha_ticker, pref):
             return alpha_ticker, alpha_source
     if finnhub_key:
         fin_ticker, fin_source = search_ticker_finnhub(name, finnhub_key, market_preference=market_preference)
-        if fin_ticker:
+        if fin_ticker and _ticker_matches_market_preference(fin_ticker, pref):
             return fin_ticker, fin_source
 
     ai_source_msg = ""
@@ -1985,12 +2071,49 @@ def resolve_ticker_auto(
             provider=provider,
             market_preference=market_preference,
         )
-        if ai_ticker:
+        if ai_ticker and _ticker_matches_market_preference(ai_ticker, pref):
             return ai_ticker, ai_source
-        ai_source_msg = ai_source
+        ai_source_msg = ai_source or "AI 시장선호 조건 불일치"
 
     fallback_msgs = [msg for msg in [ai_source_msg, yf_source, alpha_source, fin_source] if msg]
     return "", " | ".join(fallback_msgs) if fallback_msgs else "티커 자동 탐색에 실패했습니다."
+
+
+def resolve_ticker_auto_with_retry(
+    company_name: str,
+    use_ai: bool,
+    api_key: str,
+    model: str,
+    provider: str = "openai",
+    market_preference: str = "",
+) -> tuple[str, str]:
+    ticker, source = resolve_ticker_auto(
+        company_name=company_name,
+        use_ai=use_ai,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        market_preference=market_preference,
+    )
+    pref = _market_pref_normalized(market_preference)
+    is_kr = str(ticker or "").endswith(".KS") or str(ticker or "").endswith(".KQ")
+
+    # 미분류인데 국내 티커가 잡히거나, 아예 못 찾은 경우 해외 우선으로 1회 재시도.
+    need_retry_foreign = (not ticker) or (pref == "" and is_kr)
+    if need_retry_foreign:
+        retry_ticker, retry_source = resolve_ticker_auto(
+            company_name=company_name,
+            use_ai=use_ai,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            market_preference="foreign",
+        )
+        retry_is_kr = str(retry_ticker or "").endswith(".KS") or str(retry_ticker or "").endswith(".KQ")
+        if retry_ticker and not retry_is_kr:
+            return retry_ticker, f"{retry_source} (해외 우선 재시도)"
+
+    return ticker, source
 
 
 def _safe_to_float(value) -> float | None:
@@ -3665,6 +3788,7 @@ def initialize_api_settings(force: bool = False) -> None:
     global_openai_model = settings.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL
     global_claude_model = settings.get("claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL
     github_sync_enabled = _to_bool_flag(settings.get("github_sync_enabled", "false"))
+    github_sync_on_change = _to_bool_flag(settings.get("github_sync_on_change", "true"))
     github_repo = settings.get("github_repo", "")
     github_branch = settings.get("github_branch", "main") or "main"
     github_excel_path = settings.get("github_excel_path", "portfolio_auto.xlsx") or "portfolio_auto.xlsx"
@@ -3687,6 +3811,7 @@ def initialize_api_settings(force: bool = False) -> None:
         "global_openai_model": global_openai_model,
         "global_claude_model": global_claude_model,
         "github_sync_enabled": github_sync_enabled,
+        "github_sync_on_change": github_sync_on_change,
         "github_repo": github_repo,
         "github_branch": github_branch,
         "github_excel_path": github_excel_path,
@@ -3858,14 +3983,13 @@ def infer_market_preference_from_row(stock_name: str, currency: str = "", ticker
         return "domestic"
     if tkr:
         return "foreign"
-    if curr and curr != "KRW":
+    if curr and curr in {"USD", "EUR", "JPY", "CNY", "GBP", "AUD", "CAD", "CHF"}:
         return "foreign"
     if "ADR" in upper_name:
         return "foreign"
     if re.search(r"[A-Z]{2,}", upper_name):
         return "foreign"
-    if re.search(r"[가-힣]", name):
-        return "domestic"
+    # 한글명만으로 국내를 단정하면 해외기업(한글 표기) 오탐이 많아 미분류로 둔다.
     return ""
 
 
@@ -3873,14 +3997,25 @@ def build_market_preference_map(current_df: pd.DataFrame) -> dict[str, str]:
     pref_map: dict[str, str] = {}
     if current_df is None or current_df.empty:
         return pref_map
+
+    list_ticker_map: dict[str, str] = {}
+    company_list_df = load_company_list()
+    if not company_list_df.empty:
+        for _, row in company_list_df.iterrows():
+            nm = str(row.get("stock_name") or "").strip()
+            if not nm:
+                continue
+            list_ticker_map[nm] = clean_valid_ticker(str(row.get("ticker") or ""))
+
     for _, row in current_df.iterrows():
         name = str(row.get(COL_NAME) or "").strip()
         if not name:
             continue
+        ticker = clean_valid_ticker(str(row.get("ticker") or "")) or list_ticker_map.get(name, "")
         pref = infer_market_preference_from_row(
             stock_name=name,
             currency=str(row.get(COL_CURRENCY) or ""),
-            ticker=str(row.get("ticker") or ""),
+            ticker=ticker,
         )
         if pref:
             pref_map[name] = pref
@@ -4951,7 +5086,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
                                 load_snapshot(target_date), usd_krw_rate, force_usd_rate=True
                             )
                         merged_df = merge_holdings_overwrite(base_df_for_target, incoming_df, usd_krw_rate)
-                        save_snapshot(target_date, merged_df)
+                        save_snapshot(target_date, merged_df, sync_to_github=False)
                         reflected_count = len(incoming_df)
                         if target_date == selected_date:
                             st.session_state["editing_df"] = merged_df
@@ -5024,15 +5159,47 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     )
     final_df = ensure_numeric(table_df, usd_krw_rate)
 
+    # GitHub 동기화가 켜진 경우, 입력 테이블 변경을 즉시 스냅샷/원격으로 반영한다.
+    auto_sync_on_change = bool(st.session_state.get("github_sync_on_change", True))
+    if auto_sync_on_change and not final_df.empty:
+        autosave_key = f"portfolio_autosave_hash::{selected_date.isoformat()}"
+        hash_df = final_df.copy()
+        hash_df[COL_NAME] = hash_df[COL_NAME].astype(str).str.strip()
+        hash_df = hash_df.sort_values([COL_NAME, COL_CURRENCY], ascending=[True, True]).reset_index(drop=True)
+        autosave_hash = hashlib.sha256(hash_df.to_csv(index=False).encode("utf-8")).hexdigest()
+        prev_hash = st.session_state.get(autosave_key, None)
+        if prev_hash is None:
+            st.session_state[autosave_key] = autosave_hash
+        elif prev_hash != autosave_hash:
+            sync_ok, sync_msg = save_snapshot(
+                selected_date,
+                final_df,
+                sync_to_github=True,
+                sync_reason="input_auto_save",
+            )
+            st.session_state["editing_df"] = final_df
+            st.session_state[autosave_key] = autosave_hash
+            if sync_msg:
+                if sync_ok:
+                    st.info(f"자동 저장됨 ({selected_date}) / {sync_msg}")
+                else:
+                    st.warning(f"자동 저장됨 ({selected_date}) / GitHub 동기화 경고: {sync_msg}")
+            else:
+                st.info(f"자동 저장됨 ({selected_date})")
+
     save_col, dl_col = st.columns([1, 1])
     with save_col:
         if st.button("현재 날짜로 저장", type="primary", key="save_snapshot_btn"):
             if final_df.empty:
                 st.error("저장할 데이터가 없습니다. 종목 정보를 입력하세요.")
             else:
-                save_snapshot(selected_date, final_df)
+                sync_ok, sync_msg = save_snapshot(selected_date, final_df, sync_to_github=True, sync_reason="manual_save")
                 st.session_state["editing_df"] = final_df
-                sync_ok, sync_msg = sync_snapshot_to_github_excel(selected_date, final_df)
+                autosave_key = f"portfolio_autosave_hash::{selected_date.isoformat()}"
+                hash_df = final_df.copy()
+                hash_df[COL_NAME] = hash_df[COL_NAME].astype(str).str.strip()
+                hash_df = hash_df.sort_values([COL_NAME, COL_CURRENCY], ascending=[True, True]).reset_index(drop=True)
+                st.session_state[autosave_key] = hashlib.sha256(hash_df.to_csv(index=False).encode("utf-8")).hexdigest()
                 if sync_msg:
                     if sync_ok:
                         st.success(f"{selected_date} 스냅샷 저장 완료 / {sync_msg}")
@@ -5256,7 +5423,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                         market_pref = market_pref_map.get(company_name, "")
 
                         if not next_ticker:
-                            auto_ticker, _ = resolve_ticker_auto(
+                            auto_ticker, _ = resolve_ticker_auto_with_retry(
                                 company_name,
                                 use_ai=True,
                                 api_key=ai_api_key,
@@ -5408,7 +5575,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 st.session_state["analysis_ticker_autofill_notice"] = f"티커 자동 입력: {list_ticker} (기업 리스트 저장값)"
             st.session_state["analysis_ticker_source"] = "기업 리스트 저장값"
         else:
-            tkr, src = resolve_ticker_auto(
+            tkr, src = resolve_ticker_auto_with_retry(
                 company_name,
                 use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
                 api_key=analysis_ai_api_key,
@@ -5455,7 +5622,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.caption(f"티커 소스: {src}")
 
     if auto_ticker_btn:
-        tkr, src = resolve_ticker_auto(
+        tkr, src = resolve_ticker_auto_with_retry(
             analysis_company_name_value,
             use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
             api_key=analysis_ai_api_key,
@@ -5481,7 +5648,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         else:
             ticker = analysis_ticker_value
             if not ticker:
-                tkr, src = resolve_ticker_auto(
+                tkr, src = resolve_ticker_auto_with_retry(
                     company_name,
                     use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
                     api_key=analysis_ai_api_key,
@@ -5593,7 +5760,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             st.error("기업명을 입력해 주세요.")
         else:
             if not ticker:
-                tkr, src = resolve_ticker_auto(
+                tkr, src = resolve_ticker_auto_with_retry(
                     company_name,
                     use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
                     api_key=analysis_ai_api_key,
@@ -6145,7 +6312,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
     current_name = score_name_value
     prev_name = st.session_state.get("score_prev_stock_name", "")
     if current_name and (current_name != prev_name or not score_ticker_value):
-        auto_ticker, auto_src = resolve_ticker_auto(
+        auto_ticker, auto_src = resolve_ticker_auto_with_retry(
             current_name,
             use_ai=bool(st.session_state.get("score_use_ai", False)),
             api_key=score_ai_api_key,
@@ -6172,7 +6339,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
             st.caption("기업명 기반으로 티커를 자동 추천합니다.")
 
     if auto_ticker_clicked:
-        auto_ticker, auto_src = resolve_ticker_auto(
+        auto_ticker, auto_src = resolve_ticker_auto_with_retry(
             score_name_value,
             use_ai=bool(st.session_state.get("score_use_ai", False)),
             api_key=score_ai_api_key,
@@ -7045,6 +7212,11 @@ def render_api_settings_tab() -> None:
 
     st.markdown("#### GitHub 엑셀 자동 동기화")
     st.checkbox("GitHub 동기화 사용", key="github_sync_enabled")
+    st.checkbox(
+        "포트폴리오 입력 변경 시 즉시 GitHub 저장",
+        key="github_sync_on_change",
+        help="기록 입력 탭 테이블 값이 바뀌면 현재 선택 날짜 스냅샷을 자동 저장/동기화합니다.",
+    )
     st.text_input("GitHub Repo", key="github_repo", placeholder="owner/repo")
     st.text_input("GitHub Branch", key="github_branch", placeholder="main")
     st.text_input("GitHub Excel Path", key="github_excel_path", placeholder="portfolio_auto.xlsx")
@@ -7116,6 +7288,7 @@ def render_api_settings_tab() -> None:
                 "openai_model": st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL),
                 "claude_model": st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL),
                 "github_sync_enabled": "true" if bool(st.session_state.get("github_sync_enabled", False)) else "false",
+                "github_sync_on_change": "true" if bool(st.session_state.get("github_sync_on_change", True)) else "false",
                 "github_repo": st.session_state.get("github_repo", ""),
                 "github_branch": st.session_state.get("github_branch", "main"),
                 "github_excel_path": st.session_state.get("github_excel_path", "portfolio_auto.xlsx"),
