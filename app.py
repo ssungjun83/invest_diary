@@ -5093,6 +5093,55 @@ def style_figure(fig):
 
 def apply_daily_date_axis(fig):
     fig.update_xaxes(type="date", tickformat="%Y-%m-%d", hoverformat="%Y-%m-%d")
+
+    x_all = []
+    for trace in fig.data:
+        x_vals = getattr(trace, "x", None)
+        if x_vals is None:
+            continue
+        try:
+            x_all.extend(list(x_vals))
+        except Exception:
+            continue
+    if not x_all:
+        return fig
+
+    x_ser = pd.to_datetime(pd.Series(x_all), errors="coerce").dropna()
+    if x_ser.empty:
+        return fig
+    x_ser = x_ser.dt.tz_localize(None) if getattr(x_ser.dt, "tz", None) is not None else x_ser
+    unique_dates = sorted(pd.Series(x_ser.dt.date).dropna().unique().tolist())
+    if not unique_dates:
+        return fig
+
+    if len(unique_dates) == 1:
+        center = pd.Timestamp(unique_dates[0])
+        fig.update_xaxes(
+            range=[center - pd.Timedelta(days=2), center + pd.Timedelta(days=2)],
+            tickmode="array",
+            tickvals=[center],
+            ticktext=[center.strftime("%Y-%m-%d")],
+        )
+        return fig
+
+    min_dt = pd.Timestamp(unique_dates[0])
+    max_dt = pd.Timestamp(unique_dates[-1])
+    span_days = max(1, int((max_dt - min_dt).days))
+    pad_days = max(1, min(14, int(round(span_days * 0.06))))
+
+    xaxis_cfg = {"range": [min_dt - pd.Timedelta(days=pad_days), max_dt + pd.Timedelta(days=pad_days)]}
+    if len(unique_dates) <= 12:
+        xaxis_cfg["tickmode"] = "array"
+        xaxis_cfg["tickvals"] = [pd.Timestamp(d) for d in unique_dates]
+        xaxis_cfg["ticktext"] = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in unique_dates]
+    elif span_days <= 90:
+        xaxis_cfg["dtick"] = "D7"
+    elif span_days <= 365:
+        xaxis_cfg["dtick"] = "M1"
+    else:
+        xaxis_cfg["dtick"] = "M3"
+
+    fig.update_xaxes(**xaxis_cfg)
     return fig
 
 
