@@ -222,7 +222,8 @@ def _ticker_matches_market_preference(ticker: str, market_preference: str) -> bo
 
 
 def _company_name_has_hangul(name: str) -> bool:
-    return bool(re.search(r"[가-힣]", str(name or "")))
+    text = str(name or "")
+    return bool(re.search(r"[가-힣\u1100-\u11FF\u3130-\u318F]", text))
 
 
 def _looks_explicit_foreign_company_name(name: str) -> bool:
@@ -5941,16 +5942,19 @@ def infer_market_preference_from_row(stock_name: str, currency: str = "", ticker
     upper_name = name.upper()
     if tkr.endswith(".KS") or tkr.endswith(".KQ"):
         return "domestic"
-    if tkr:
-        return "foreign"
     if curr and curr in {"USD", "EUR", "JPY", "CNY", "GBP", "AUD", "CAD", "CHF"}:
         return "foreign"
     if "ADR" in upper_name:
         return "foreign"
+    builtin_hint = get_builtin_ticker_hint(name)
+    if builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ"):
+        return "domestic"
     if _company_name_has_hangul(name):
         if _looks_explicit_foreign_company_name(name):
             return "foreign"
         return "domestic"
+    if tkr:
+        return "foreign"
     if re.search(r"[A-Z]{2,}", upper_name):
         return "foreign"
     # 한글명이 없고 단서도 없으면 미분류.
@@ -7608,6 +7612,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             market_pref = market_pref_map.get(company_name, "")
             if _company_name_has_hangul(company_name) and not _looks_explicit_foreign_company_name(company_name):
                 market_pref = "domestic"
+            builtin_hint = get_builtin_ticker_hint(company_name)
+            if builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ"):
+                market_pref = "domestic"
             if not market_pref:
                 if row_ticker:
                     market_pref = "domestic" if (row_ticker.endswith(".KS") or row_ticker.endswith(".KQ")) else "foreign"
@@ -7647,6 +7654,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 next_ticker.endswith(".KS") or next_ticker.endswith(".KQ")
             ):
                 next_ticker = ""
+            if next_ticker and builtin_hint and (builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ")):
+                if not (next_ticker.endswith(".KS") or next_ticker.endswith(".KQ")):
+                    next_ticker = ""
 
             if not next_sector:
                 auto_sector, _ = resolve_sector_auto(
