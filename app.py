@@ -4287,6 +4287,51 @@ def clear_company_list_meta_all(source: str = "manual_meta_reset") -> int:
         conn.close()
 
 
+def clear_company_list_meta_by_names(stock_names: list[str], source: str = "manual_meta_reset_selected") -> int:
+    names = []
+    seen = set()
+    for raw in stock_names or []:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
+    if not names:
+        return 0
+
+    now_str = datetime.now().isoformat(timespec="seconds")
+    placeholders = ",".join(["?"] * len(names))
+    conn = get_conn()
+    try:
+        params = tuple(names)
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM company_list WHERE stock_name IN ({placeholders})",
+            params,
+        ).fetchone()
+        total = int(row[0]) if row and row[0] is not None else 0
+        if total <= 0:
+            return 0
+
+        conn.execute(
+            f"""
+            UPDATE company_list
+            SET ticker = NULL,
+                sector = NULL,
+                price_krw = NULL,
+                price_source = NULL,
+                price_updated_at = NULL,
+                source = ?,
+                updated_at = ?
+            WHERE stock_name IN ({placeholders})
+            """,
+            ((source or "manual_meta_reset_selected").strip(), now_str, *names),
+        )
+        conn.commit()
+        return total
+    finally:
+        conn.close()
+
+
 def load_company_compare_sets() -> pd.DataFrame:
     conn = get_conn()
     try:
@@ -6759,9 +6804,13 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.success(st.session_state.pop("analysis_bulk_reset_notice"))
     if "analysis_bulk_reset_warning" in st.session_state:
         st.warning(st.session_state.pop("analysis_bulk_reset_warning"))
+    if "analysis_bulk_selected_reset_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_bulk_selected_reset_notice"))
+    if "analysis_bulk_selected_reset_warning" in st.session_state:
+        st.warning(st.session_state.pop("analysis_bulk_selected_reset_warning"))
 
     if overview_rows:
-        st.caption("목록에서 기업 행을 클릭하면 아래 기업명/티커 입력이 자동 선택됩니다.")
+        st.caption("목록에서 기업 행을 선택하면 아래 기업명/티커 입력이 자동 선택됩니다.")
         overview_df = pd.DataFrame(overview_rows)
         overview_df["현재주가(원화)"] = pd.to_numeric(overview_df["현재주가(원화)"], errors="coerce")
         current_input_name = (st.session_state.get("analysis_company_name_input") or "").strip()
@@ -6776,7 +6825,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     "현재주가(원화)": st.column_config.NumberColumn("현재주가(원화)", format="localized")
                 },
                 on_select="rerun",
-                selection_mode="single-row",
+                selection_mode="multi-row",
                 key="analysis_company_overview_table",
             )
             try:
@@ -6785,6 +6834,59 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 selected_rows = []
         except TypeError:
             st.dataframe(overview_df, use_container_width=True, hide_index=True)
+
+        selected_names = []
+        if selected_rows:
+            for idx in selected_rows:
+                try:
+                    row_idx = int(idx)
+                except Exception:
+                    continue
+                if 0 <= row_idx < len(overview_df):
+                    nm = str(overview_df.iloc[row_idx].get("기업명") or "").strip()
+                    if nm:
+                        selected_names.append(nm)
+        selected_names = list(dict.fromkeys(selected_names))
+        st.session_state["analysis_selected_overview_names"] = selected_names
+
+        sel_col1, sel_col2 = st.columns([1.2, 2.2])
+        with sel_col1:
+            reset_selected_btn = st.button(
+                "선택 항목 초기화 후 재탐색 (API+AI)",
+                key="analysis_reset_refill_selected_company_meta_btn",
+            )
+        with sel_col2:
+            st.caption(f"현재 선택: {len(selected_names):,}개")
+
+        if reset_selected_btn:
+            targets = [{"기업명": nm, "티커": "", "산업섹터": ""} for nm in selected_names]
+            if not targets:
+                st.warning("먼저 표에서 기업을 1개 이상 체크해 주세요.")
+            else:
+                ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+                cleared_count = clear_company_list_meta_by_names(
+                    selected_names,
+                    source="manual_meta_reset_selected",
+                )
+                with st.spinner("선택 기업 티커/산업섹터 초기화 후 재탐색 중입니다..."):
+                    updated_count, skipped_count, unresolved = _bulk_fill_company_meta(
+                        targets,
+                        ai_provider=ai_provider,
+                        ai_api_key=ai_api_key,
+                        ai_model=ai_model,
+                        force_refresh=True,
+                    )
+                st.session_state["analysis_bulk_selected_reset_notice"] = (
+                    f"선택 초기화+재탐색 완료: 초기화 {cleared_count}개, 업데이트 {updated_count}개, 유지/실패 {skipped_count}개"
+                )
+                if unresolved:
+                    preview = ", ".join(unresolved[:8])
+                    remain = len(unresolved) - min(8, len(unresolved))
+                    tail = f" 외 {remain}개" if remain > 0 else ""
+                    st.session_state["analysis_bulk_selected_reset_warning"] = (
+                        f"선택 항목 중 일부는 여전히 미완성입니다: {preview}{tail}"
+                    )
+                st.rerun()
 
         if selected_rows:
             row_idx = int(selected_rows[0])
