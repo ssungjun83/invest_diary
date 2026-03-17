@@ -4229,6 +4229,35 @@ def delete_company_list_entry(stock_name: str) -> None:
         conn.close()
 
 
+def clear_company_list_ticker(stock_name: str, source: str = "manual_edit_clear") -> bool:
+    name = (stock_name or "").strip()
+    if not name:
+        return False
+    now_str = datetime.now().isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT stock_name FROM company_list WHERE stock_name = ?", (name,)).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            """
+            UPDATE company_list
+            SET ticker = NULL,
+                price_krw = NULL,
+                price_source = NULL,
+                price_updated_at = NULL,
+                source = ?,
+                updated_at = ?
+            WHERE stock_name = ?
+            """,
+            ((source or "manual_edit_clear").strip(), now_str, name),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 def load_company_compare_sets() -> pd.DataFrame:
     conn = get_conn()
     try:
@@ -6686,7 +6715,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     selected_company_for_edit = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_company"), "")
     if selected_company_for_edit:
         st.markdown("##### 선택 기업 티커/섹터 수정")
-        edit_col1, edit_col2, edit_col3, edit_col4 = st.columns([1.1, 1.1, 1.2, 0.9])
+        edit_col1, edit_col2, edit_col3, edit_col4, edit_col5 = st.columns([1.0, 1.0, 1.1, 0.75, 0.85])
         with edit_col1:
             st.caption(f"선택 기업: **{selected_company_for_edit}**")
         with edit_col2:
@@ -6703,6 +6732,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             )
         with edit_col4:
             save_selected_meta_btn = st.button("선택값 저장", key="analysis_save_selected_meta_btn")
+        with edit_col5:
+            clear_selected_ticker_btn = st.button("티커 비우기", key="analysis_clear_selected_ticker_btn")
 
         if save_selected_meta_btn:
             ticker_raw = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_ticker_input"), "")
@@ -6727,6 +6758,21 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 st.session_state["analysis_ticker_autofill_notice"] = (
                     f"{selected_company_for_edit} 수정 저장 완료"
                     + (f" (티커 {ticker_new})" if ticker_new else "")
+                )
+                st.rerun()
+
+        if clear_selected_ticker_btn:
+            cleared = clear_company_list_ticker(selected_company_for_edit, source="manual_edit_clear")
+            if not cleared:
+                st.warning("티커를 비울 기업을 찾지 못했습니다.")
+            else:
+                st.session_state["analysis_selected_overview_ticker_input"] = ""
+                st.session_state["analysis_ticker_pending"] = ""
+                st.session_state["analysis_ticker_source"] = "기업 리스트 수동 초기화"
+                st.session_state["analysis_company_name_pending"] = selected_company_for_edit
+                st.session_state["analysis_company_hint"] = "직접입력"
+                st.session_state["analysis_ticker_autofill_notice"] = (
+                    f"{selected_company_for_edit} 티커를 비우고 주가 캐시를 초기화했습니다."
                 )
                 st.rerun()
 
