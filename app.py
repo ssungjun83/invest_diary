@@ -2066,6 +2066,81 @@ def search_ticker_yfinance(company_name: str, market_preference: str = "") -> tu
     return "", msg
 
 
+def _build_ticker_from_naver_item(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+    code = clean_valid_ticker(str(item.get("code") or ""))
+    reuters = clean_valid_ticker(str(item.get("reutersCode") or ""))
+    type_code = str(item.get("typeCode") or "").strip().upper()
+    nation_code = str(item.get("nationCode") or "").strip().upper()
+    url = str(item.get("url") or "").strip().lower()
+
+    if nation_code == "KOR" and re.fullmatch(r"\d{6}", code or ""):
+        suffix = ".KQ" if type_code == "KOSDAQ" else ".KS"
+        return f"{code}{suffix}"
+    if re.fullmatch(r"\d{6}", code or "") and "/domestic/stock/" in url:
+        suffix = ".KQ" if type_code == "KOSDAQ" else ".KS"
+        return f"{code}{suffix}"
+    if nation_code == "USA":
+        return clean_valid_ticker(reuters or code)
+    return clean_valid_ticker(reuters or code)
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _fetch_naver_stock_candidates(company_name: str) -> tuple[list[dict], str]:
+    name = (company_name or "").strip()
+    if not name:
+        return [], "기업명이 비어 있습니다."
+
+    try:
+        resp = requests.get(
+            "https://ac.stock.naver.com/ac",
+            params={"q": name, "target": "stock,ipo,index,marketindicator"},
+            headers=HTTP_HEADERS_COMMON,
+            timeout=12,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    except Exception as exc:
+        return [], f"Naver 검색 실패: {exc}"
+
+    items = payload.get("items") or []
+    if not isinstance(items, list) or not items:
+        return [], "Naver 검색 결과가 없습니다."
+
+    candidates = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        category = str(item.get("category") or "").strip().lower()
+        if category and category != "stock":
+            continue
+        symbol = _build_ticker_from_naver_item(item)
+        if not symbol:
+            continue
+        candidates.append(
+            {
+                "symbol": symbol,
+                "name": str(item.get("name") or "").strip(),
+                "exchange": str(item.get("typeCode") or "").strip(),
+                "region": str(item.get("nationCode") or "").strip(),
+            }
+        )
+    if not candidates:
+        return [], "Naver 유효 티커 결과가 없습니다."
+    return candidates, ""
+
+
+def search_ticker_naver(company_name: str, market_preference: str = "") -> tuple[str, str]:
+    name = (company_name or "").strip()
+    if not name:
+        return "", "기업명이 비어 있습니다."
+    candidates, err = _fetch_naver_stock_candidates(name)
+    if not candidates:
+        return "", err
+    return choose_best_ticker_candidate(name, candidates, "Naver증권", market_preference=market_preference)
+
+
 def search_ticker_alpha_vantage(company_name: str, api_key: str, market_preference: str = "") -> tuple[str, str]:
     name = (company_name or "").strip()
     key = (api_key or "").strip()
@@ -2406,6 +2481,85 @@ def fetch_sector_from_yahoo_asset_profile(ticker: str) -> tuple[str, str]:
     return "", f"yahoo assetProfile 조회 실패: {last_err}"
 
 
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def fetch_sector_from_naver_domestic(ticker: str) -> tuple[str, str]:
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
+        return "", "티커가 비어 있습니다."
+
+    code = ""
+    if re.fullmatch(r"\d{6}\.(KS|KQ)", tkr):
+        code = tkr.split(".")[0]
+    elif re.fullmatch(r"\d{6}", tkr):
+        code = tkr
+    if not code:
+        return "", "Naver 섹터 조회는 국내 티커(.KS/.KQ)만 지원합니다."
+
+    try:
+        resp = requests.get(
+            "https://finance.naver.com/item/main.naver",
+            params={"code": code},
+            headers=HTTP_HEADERS_COMMON,
+            timeout=12,
+        )
+        resp.raise_for_status()
+        body = resp.text or ""
+    except Exception as exc:
+        return "", f"Naver 종목 페이지 조회 실패: {exc}"
+
+    matches = re.findall(r"sise_group_detail\.naver\?type=upjong[^\">']*[\"']>\s*([^<]+)\s*<", body, re.I)
+    for raw in matches:
+        sector = html.unescape(str(raw or "")).strip()
+        sector = re.sub(r"\s+", " ", sector)
+        if sector:
+            return sector, "naver_upjong"
+    return "", "Naver 업종 정보를 찾지 못했습니다."
+
+
+def resolve_sector_auto(
+    company_name: str,
+    ticker: str,
+    ai_api_key: str = "",
+    ai_model: str = "",
+    ai_provider: str = "claude",
+) -> tuple[str, str]:
+    name = (company_name or "").strip()
+    tkr = clean_valid_ticker(ticker)
+    if not tkr:
+        heuristic = infer_sector_from_name_heuristic(name, "")
+        return (heuristic, "name_heuristic") if heuristic else ("", "티커 없음")
+
+    fast_sector, fast_src = fetch_sector_from_yahoo_asset_profile(tkr)
+    if fast_sector:
+        return fast_sector, fast_src
+
+    naver_sector, naver_src = fetch_sector_from_naver_domestic(tkr)
+    if naver_sector:
+        return naver_sector, naver_src
+
+    fetched_summary, _, fetched_source = fetch_company_financial_summary_multi_source(tkr)
+    if isinstance(fetched_summary, dict) and fetched_summary:
+        summary_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
+        if summary_sector:
+            return summary_sector, fetched_source or "financial_summary"
+
+    if ai_api_key:
+        ai_sector, ai_src = infer_sector_with_ai(
+            name,
+            ticker=tkr,
+            api_key=ai_api_key,
+            model=ai_model,
+            provider=ai_provider,
+        )
+        if ai_sector:
+            return ai_sector, ai_src
+
+    heuristic = infer_sector_from_name_heuristic(name, tkr)
+    if heuristic:
+        return heuristic, "name_heuristic"
+    return "", "섹터 자동 탐색 실패"
+
+
 def infer_sector_from_name_heuristic(company_name: str, ticker: str = "") -> str:
     text = f"{str(company_name or '').strip()} {str(ticker or '').strip().upper()}".strip().upper()
     if not text:
@@ -2464,6 +2618,10 @@ def resolve_ticker_auto(
     if yf_ticker and _ticker_matches_market_preference(yf_ticker, pref):
         return yf_ticker, yf_source
 
+    nv_ticker, nv_source = search_ticker_naver(name, market_preference=market_preference)
+    if nv_ticker and _ticker_matches_market_preference(nv_ticker, pref):
+        return nv_ticker, nv_source
+
     sec_ticker = ""
     sec_source = ""
     if pref != "domestic":
@@ -2500,7 +2658,9 @@ def resolve_ticker_auto(
             return ai_ticker, f"{ai_source} (자동 보조)"
         ai_source_msg = ai_source or "AI 시장선호 조건 불일치"
 
-    fallback_msgs = [msg for msg in [ai_source_msg, web_source, yf_source, sec_source, alpha_source, fin_source] if msg]
+    fallback_msgs = [
+        msg for msg in [ai_source_msg, web_source, yf_source, nv_source, sec_source, alpha_source, fin_source] if msg
+    ]
     return "", " | ".join(fallback_msgs) if fallback_msgs else "티커 자동 탐색에 실패했습니다."
 
 
@@ -6390,20 +6550,21 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         new_name = (st.session_state.get("analysis_new_company_name") or "").strip()
         new_ticker = clean_valid_ticker(st.session_state.get("analysis_new_company_ticker") or "")
         new_sector = (st.session_state.get("analysis_new_company_sector") or "").strip()
+        analysis_ai_provider, analysis_ai_api_key, analysis_ai_model = get_ai_settings_from_session("analysis")
         if not new_name:
             st.warning("추가할 기업명을 입력해 주세요.")
         else:
             resolved_sector = new_sector
-            if not resolved_sector and new_ticker:
-                fast_sector, fast_src = fetch_sector_from_yahoo_asset_profile(new_ticker)
-                if fast_sector:
-                    resolved_sector = fast_sector
-                else:
-                    fetched_summary, fetched_err, _ = fetch_company_financial_summary_multi_source(new_ticker)
-                    if fetched_summary:
-                        resolved_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
-                    elif fetched_err:
-                        st.caption(f"섹터 자동 조회 실패: {fetched_err} / {fast_src}")
+            if not resolved_sector:
+                resolved_sector, sector_src = resolve_sector_auto(
+                    new_name,
+                    new_ticker,
+                    ai_api_key=analysis_ai_api_key,
+                    ai_model=analysis_ai_model,
+                    ai_provider=analysis_ai_provider,
+                )
+                if not resolved_sector and sector_src:
+                    st.caption(f"섹터 자동 조회 실패: {sector_src}")
             if not resolved_sector:
                 resolved_sector = infer_sector_from_name_heuristic(new_name, new_ticker)
             upsert_company_list_entry(new_name, new_ticker, sector=resolved_sector, source="manual")
@@ -6508,24 +6669,16 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                             if auto_ticker:
                                 ticker = auto_ticker
 
-                        if enrich_meta and not sector and ticker:
-                            fast_sector, _ = fetch_sector_from_yahoo_asset_profile(ticker)
-                            if fast_sector:
-                                sector = fast_sector
-                        if enrich_meta and not sector and ticker:
-                            fetched_summary, _, _ = fetch_company_financial_summary_multi_source(ticker)
-                            if fetched_summary:
-                                sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
-                        if enrich_meta and not sector and ai_api_key:
-                            ai_sector, _ = infer_sector_with_ai(
+                        if enrich_meta and not sector:
+                            auto_sector, _ = resolve_sector_auto(
                                 stock_name,
-                                ticker=ticker,
-                                api_key=ai_api_key,
-                                model=ai_model,
-                                provider=ai_provider,
+                                ticker,
+                                ai_api_key=ai_api_key,
+                                ai_model=ai_model,
+                                ai_provider=ai_provider,
                             )
-                            if ai_sector:
-                                sector = ai_sector
+                            if auto_sector:
+                                sector = auto_sector
                         if not sector:
                             sector = infer_sector_from_name_heuristic(stock_name, ticker)
 
@@ -6620,29 +6773,16 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 if auto_ticker:
                     next_ticker = auto_ticker
 
-            if not next_sector and next_ticker:
-                fast_sector, _ = fetch_sector_from_yahoo_asset_profile(next_ticker)
-                if fast_sector:
-                    next_sector = fast_sector
-
-            if not next_sector and next_ticker:
-                fetched_summary, _, _ = fetch_company_financial_summary_multi_source(next_ticker)
-                if fetched_summary:
-                    next_sector = str(fetched_summary.get("sector") or fetched_summary.get("industry") or "").strip()
-
-            if not next_sector and ai_api_key:
-                ai_sector, _ = infer_sector_with_ai(
-                    company_name,
-                    ticker=next_ticker,
-                    api_key=ai_api_key,
-                    model=ai_model,
-                    provider=ai_provider,
-                )
-                if ai_sector:
-                    next_sector = ai_sector
-
             if not next_sector:
-                next_sector = infer_sector_from_name_heuristic(company_name, next_ticker)
+                auto_sector, _ = resolve_sector_auto(
+                    company_name,
+                    next_ticker,
+                    ai_api_key=ai_api_key,
+                    ai_model=ai_model,
+                    ai_provider=ai_provider,
+                )
+                if auto_sector:
+                    next_sector = auto_sector
 
             changed = (next_ticker != current_ticker) or (next_sector != current_sector)
             has_any_new = bool(next_ticker or next_sector)
