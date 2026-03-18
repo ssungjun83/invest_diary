@@ -22,6 +22,8 @@ import streamlit as st
 
 try:
     from docx import Document
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
 
     HAS_PYTHON_DOCX = True
 except Exception:
@@ -5103,6 +5105,132 @@ def _safe_report_filename(company_name: str, ticker: str, analysis_date_value) -
     return f"{safe}.docx"
 
 
+def _fmt_ratio_brief(value, digits: int = 2) -> str:
+    num = _safe_to_float(value)
+    if num is None:
+        return "데이터 없음"
+    return f"{num:,.{digits}f}"
+
+
+def _set_docx_run_noto(run, size_pt: float | None = None, bold: bool | None = None) -> None:
+    if run is None:
+        return
+    run.font.name = "Noto Sans KR"
+    if size_pt is not None:
+        run.font.size = Pt(size_pt)
+    if bold is not None:
+        run.font.bold = bool(bold)
+    try:
+        rpr = run._element.get_or_add_rPr()
+        rfonts = rpr.get_or_add_rFonts()
+        rfonts.set(qn("w:ascii"), "Noto Sans KR")
+        rfonts.set(qn("w:hAnsi"), "Noto Sans KR")
+        rfonts.set(qn("w:eastAsia"), "Noto Sans KR")
+        rfonts.set(qn("w:cs"), "Noto Sans KR")
+    except Exception:
+        pass
+
+
+def _set_docx_paragraph_noto(paragraph, size_pt: float | None = None, bold: bool | None = None) -> None:
+    if paragraph is None:
+        return
+    if not paragraph.runs:
+        paragraph.add_run("")
+    for run in paragraph.runs:
+        _set_docx_run_noto(run, size_pt=size_pt, bold=bold)
+    try:
+        if size_pt is not None:
+            paragraph.paragraph_format.space_after = Pt(4)
+    except Exception:
+        pass
+
+
+def _set_docx_style_noto(doc, style_name: str, size_pt: float, bold: bool = False) -> None:
+    try:
+        style = doc.styles[style_name]
+    except Exception:
+        return
+    style.font.name = "Noto Sans KR"
+    style.font.size = Pt(size_pt)
+    style.font.bold = bool(bold)
+    try:
+        rpr = style._element.get_or_add_rPr()
+        rfonts = rpr.get_or_add_rFonts()
+        rfonts.set(qn("w:ascii"), "Noto Sans KR")
+        rfonts.set(qn("w:hAnsi"), "Noto Sans KR")
+        rfonts.set(qn("w:eastAsia"), "Noto Sans KR")
+        rfonts.set(qn("w:cs"), "Noto Sans KR")
+    except Exception:
+        pass
+
+
+def _docx_add_heading(doc, text: str, level: int = 1):
+    style_name = "Title" if level == 0 else ("Heading 1" if level == 1 else "Heading 2")
+    p = doc.add_paragraph(style=style_name)
+    run = p.add_run(str(text or "").strip())
+    _set_docx_run_noto(run, size_pt=(24 if level == 0 else 15 if level == 1 else 12), bold=True)
+    return p
+
+
+def _docx_add_paragraph(doc, text: str, size_pt: float = 11, bold: bool = False, style_name: str = ""):
+    p = doc.add_paragraph(style=style_name) if style_name else doc.add_paragraph()
+    run = p.add_run(str(text or ""))
+    _set_docx_run_noto(run, size_pt=size_pt, bold=bold)
+    return p
+
+
+def _docx_add_bullet(doc, text: str, size_pt: float = 11):
+    p = doc.add_paragraph(style="List Bullet")
+    run = p.add_run(str(text or ""))
+    _set_docx_run_noto(run, size_pt=size_pt, bold=False)
+    return p
+
+
+def _fmt_statement_value(value) -> str:
+    num = _safe_to_float(value)
+    if num is None:
+        return "-"
+    return f"{num:,.0f}"
+
+
+def _docx_add_financial_statement_table(doc, title: str, records: list[dict], max_rows: int = 12) -> bool:
+    rows = [r for r in (records or []) if isinstance(r, dict) and str(r.get("item") or "").strip()]
+    if not rows:
+        return False
+
+    year_cols: list[str] = []
+    for row in rows:
+        for key in row.keys():
+            k = str(key or "").strip()
+            if not k or k == "item":
+                continue
+            if k not in year_cols:
+                year_cols.append(k)
+    year_cols = year_cols[:4]
+    if not year_cols:
+        return False
+
+    _docx_add_heading(doc, title, level=2)
+    table = doc.add_table(rows=1, cols=1 + len(year_cols))
+    table.style = "Table Grid"
+    header = table.rows[0].cells
+    header[0].text = "항목"
+    for idx, year in enumerate(year_cols, start=1):
+        header[idx].text = str(year)
+
+    for row in rows[:max_rows]:
+        tr = table.add_row().cells
+        tr[0].text = str(row.get("item") or "").strip()
+        for idx, year in enumerate(year_cols, start=1):
+            tr[idx].text = _fmt_statement_value(row.get(year))
+
+    for ridx, tr in enumerate(table.rows):
+        for cell in tr.cells:
+            for p in cell.paragraphs:
+                _set_docx_paragraph_noto(p, size_pt=10.5, bold=(ridx == 0))
+    return True
+
+
 def build_company_analysis_docx_bytes(
     company_name: str,
     ticker: str,
@@ -5114,6 +5242,11 @@ def build_company_analysis_docx_bytes(
         raise RuntimeError("python-docx 패키지가 설치되어 있지 않습니다.")
 
     doc = Document()
+    _set_docx_style_noto(doc, "Normal", size_pt=11, bold=False)
+    _set_docx_style_noto(doc, "Title", size_pt=24, bold=True)
+    _set_docx_style_noto(doc, "Heading 1", size_pt=15, bold=True)
+    _set_docx_style_noto(doc, "Heading 2", size_pt=12, bold=True)
+
     title_company = str(company_name or "기업명 미입력").strip()
     title_ticker = clean_valid_ticker(str(ticker or "").strip())
     title_date = ""
@@ -5127,28 +5260,85 @@ def build_company_analysis_docx_bytes(
     except Exception:
         title_date = str(analysis_date_value or "").strip()
 
-    doc.add_heading(f"{title_company} 기업 분석 보고서", level=0)
+    _docx_add_heading(doc, f"{title_company} 기업 분석 보고서", level=0)
     subtitle = f"기준일: {title_date or '미입력'}"
     if title_ticker:
         subtitle = f"{subtitle} | 티커: {title_ticker}"
-    doc.add_paragraph(subtitle)
+    _docx_add_paragraph(doc, subtitle, size_pt=11)
 
     fs = financial_summary if isinstance(financial_summary, dict) else {}
     if fs:
-        doc.add_heading("기초 정보", level=1)
+        _docx_add_heading(doc, "기초 정보", level=1)
         name = str(fs.get("name") or "").strip()
         sector = str(fs.get("sector") or fs.get("industry") or "").strip()
         country = str(fs.get("country") or "").strip()
         market_cap = _fmt_num_brief(fs.get("market_cap"))
         revenue = _fmt_num_brief(fs.get("total_revenue"))
         if name:
-            doc.add_paragraph(f"회사명: {name}")
+            _docx_add_paragraph(doc, f"회사명: {name}", size_pt=11)
         if sector:
-            doc.add_paragraph(f"산업섹터: {sector}")
+            _docx_add_paragraph(doc, f"산업섹터: {sector}", size_pt=11)
         if country:
-            doc.add_paragraph(f"국가: {country}")
-        doc.add_paragraph(f"시가총액(추정): {market_cap}")
-        doc.add_paragraph(f"매출 규모(최근): {revenue}")
+            _docx_add_paragraph(doc, f"국가: {country}", size_pt=11)
+        _docx_add_paragraph(doc, f"시가총액(추정): {market_cap}", size_pt=11)
+        _docx_add_paragraph(doc, f"매출 규모(최근): {revenue}", size_pt=11)
+
+        _docx_add_heading(doc, "핵심 재무지표", level=1)
+        metric_rows = [
+            ("시가총액", _fmt_num_brief(fs.get("market_cap"))),
+            ("매출", _fmt_num_brief(fs.get("total_revenue"))),
+            ("EBITDA", _fmt_num_brief(fs.get("ebitda"))),
+            ("순이익", _fmt_num_brief(fs.get("net_income_to_common"))),
+            ("영업현금흐름", _fmt_num_brief(fs.get("operating_cashflow"))),
+            ("잉여현금흐름", _fmt_num_brief(fs.get("free_cashflow"))),
+            ("매출성장률(%)", _fmt_pct_brief(fs.get("revenue_growth_pct"))),
+            ("이익성장률(%)", _fmt_pct_brief(fs.get("earnings_growth_pct"))),
+            ("ROE(%)", _fmt_pct_brief(fs.get("roe_pct"))),
+            ("영업이익률(%)", _fmt_pct_brief(fs.get("operating_margin_pct"))),
+            ("매출총이익률(%)", _fmt_pct_brief(fs.get("gross_margin_pct"))),
+            ("배당수익률(%)", _fmt_pct_brief(fs.get("dividend_yield_pct"))),
+            ("부채비율(D/E)", _fmt_ratio_brief(fs.get("debt_to_equity"))),
+            ("유동비율", _fmt_ratio_brief(fs.get("current_ratio"))),
+            ("PER", _fmt_ratio_brief(fs.get("trailing_pe"))),
+            ("Forward PER", _fmt_ratio_brief(fs.get("forward_pe"))),
+            ("PBR", _fmt_ratio_brief(fs.get("price_to_book"))),
+            ("Beta", _fmt_ratio_brief(fs.get("beta"), digits=3)),
+        ]
+        metric_table = doc.add_table(rows=1, cols=2)
+        metric_table.style = "Table Grid"
+        metric_table.rows[0].cells[0].text = "지표"
+        metric_table.rows[0].cells[1].text = "값"
+        for label, val in metric_rows:
+            row_cells = metric_table.add_row().cells
+            row_cells[0].text = str(label)
+            row_cells[1].text = str(val)
+        for ridx, row in enumerate(metric_table.rows):
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    _set_docx_paragraph_noto(p, size_pt=10.5, bold=(ridx == 0))
+
+        _docx_add_heading(doc, "재무제표 요약(연간)", level=1)
+        has_stmt = False
+        has_stmt = _docx_add_financial_statement_table(
+            doc,
+            "손익계산서(최근 연도)",
+            fs.get("income_statement_annual") if isinstance(fs.get("income_statement_annual"), list) else [],
+            max_rows=10,
+        ) or has_stmt
+        has_stmt = _docx_add_financial_statement_table(
+            doc,
+            "재무상태표(최근 연도)",
+            fs.get("balance_sheet_annual") if isinstance(fs.get("balance_sheet_annual"), list) else [],
+            max_rows=10,
+        ) or has_stmt
+        has_stmt = _docx_add_financial_statement_table(
+            doc,
+            "현금흐름표(최근 연도)",
+            fs.get("cashflow_annual") if isinstance(fs.get("cashflow_annual"), list) else [],
+            max_rows=10,
+        ) or has_stmt
+        if not has_stmt:
+            _docx_add_paragraph(doc, "재무제표 연간 데이터가 없어 핵심 재무지표만 표시했습니다.", size_pt=10.5)
 
     sections = [
         ("기업 개요", analysis_fields.get("company_overview", "")),
@@ -5159,14 +5349,25 @@ def build_company_analysis_docx_bytes(
         ("요약 메모", analysis_fields.get("key_takeaway", "")),
     ]
     for section_title, section_text in sections:
-        doc.add_heading(section_title, level=1)
+        _docx_add_heading(doc, section_title, level=1)
         lines = _split_report_lines(section_text)
         if lines:
             for ln in lines:
-                doc.add_paragraph(ln, style="List Bullet")
+                _docx_add_bullet(doc, ln, size_pt=11)
         else:
             fallback_text = str(section_text or "").strip()
-            doc.add_paragraph(fallback_text or "내용 없음")
+            _docx_add_paragraph(doc, fallback_text or "내용 없음", size_pt=11)
+
+    for p in doc.paragraphs:
+        style_name = str(getattr(getattr(p, "style", None), "name", "") or "")
+        if style_name == "Title":
+            _set_docx_paragraph_noto(p, size_pt=24, bold=True)
+        elif style_name == "Heading 1":
+            _set_docx_paragraph_noto(p, size_pt=15, bold=True)
+        elif style_name == "Heading 2":
+            _set_docx_paragraph_noto(p, size_pt=12, bold=True)
+        else:
+            _set_docx_paragraph_noto(p, size_pt=11, bold=None)
 
     out = BytesIO()
     doc.save(out)
