@@ -6692,18 +6692,18 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
                 if trace.name == "total_value":
                     trace.update(
                         name="총평가금액",
-                        line={"width": 3},
-                        marker={"size": 8},
+                        line={"width": 3, "color": "#0f766e"},
+                        marker={"size": 8, "color": "#0f766e"},
                         fill="tozeroy",
-                        fillcolor="rgba(15,118,110,0.22)",
+                        fillcolor="rgba(16,185,129,0.24)",
                     )
                 else:
                     trace.update(
                         name="총원금",
-                        line={"width": 3},
-                        marker={"size": 8},
+                        line={"width": 3, "color": "#1d4ed8"},
+                        marker={"size": 8, "color": "#1d4ed8"},
                         fill="tozeroy",
-                        fillcolor="rgba(51,65,85,0.16)",
+                        fillcolor="rgba(59,130,246,0.14)",
                     )
             core_line_fig.update_yaxes(range=[0, y_axis_max], tickformat=",")
             add_line_labels(core_line_fig, pct=False, last_only=False)
