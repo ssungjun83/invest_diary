@@ -113,7 +113,10 @@ DEFAULT_TICKER_HINTS = {
     "넥스틸": "092790.KS",
     "휴스틸": "005010.KS",
     "TIME 코리아밸류업액티브": "495060.KS",
+    "TIME코리아밸류업액티브": "495060.KS",
+    "코리아밸류업액티브": "495060.KS",
     "노브": "NOV",
+    "노브(주)": "NOV",
 }
 
 AI_PROVIDER_OPTIONS = ["OpenAI", "Claude"]
@@ -183,8 +186,19 @@ def clean_valid_ticker(value: str) -> str:
 
 def get_builtin_ticker_hint(company_name: str) -> str:
     name = (company_name or "").strip()
-    hinted = DEFAULT_TICKER_HINTS.get(name, "")
-    return clean_valid_ticker(hinted)
+    hinted = clean_valid_ticker(DEFAULT_TICKER_HINTS.get(name, ""))
+    if hinted:
+        return hinted
+    name_norm = normalize_company_name_for_match(name)
+    if not name_norm:
+        return ""
+    # 공백/기호 차이를 허용하는 정규화 매칭
+    for key, value in DEFAULT_TICKER_HINTS.items():
+        if normalize_company_name_for_match(key) == name_norm:
+            cand = clean_valid_ticker(value)
+            if cand:
+                return cand
+    return ""
 
 
 def normalize_company_name_for_match(value: str) -> str:
@@ -5195,6 +5209,11 @@ def upsert_company_list_entry(
         price_val = None
     p_source = (price_source or "").strip()
     source_text = None if source is None else str(source).strip()
+    builtin_hint = get_builtin_ticker_hint(name)
+    # 자동/일괄 경로에서는 내장 티커 힌트를 우선 적용해 오탐 저장을 방지한다.
+    # 수동 편집(manual_edit)에서만 사용자의 명시 입력을 그대로 존중한다.
+    if builtin_hint and not (source_text == "manual_edit" and tkr):
+        tkr = builtin_hint
     now_str = datetime.now().isoformat(timespec="seconds")
 
     conn = get_conn()
@@ -5298,6 +5317,26 @@ def clear_company_list_ticker(stock_name: str, source: str = "manual_edit_clear"
         return True
     finally:
         conn.close()
+
+
+def reconcile_builtin_ticker_overrides() -> int:
+    df = load_company_list()
+    if df is None or df.empty:
+        return 0
+    updated = 0
+    for _, row in df.iterrows():
+        name = str(row.get("stock_name") or "").strip()
+        if not name:
+            continue
+        hint = get_builtin_ticker_hint(name)
+        if not hint:
+            continue
+        current = clean_valid_ticker(str(row.get("ticker") or ""))
+        if current == hint:
+            continue
+        upsert_company_list_entry(name, ticker=hint, source="builtin_override")
+        updated += 1
+    return updated
 
 
 def clear_company_list_meta_all(source: str = "manual_meta_reset") -> int:
@@ -5977,15 +6016,15 @@ def infer_market_preference_from_row(stock_name: str, currency: str = "", ticker
     tkr = clean_valid_ticker(ticker)
     curr = str(currency or "").strip().upper()
     upper_name = name.upper()
+    builtin_hint = get_builtin_ticker_hint(name)
+    if builtin_hint:
+        return "domestic" if (builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ")) else "foreign"
     if tkr.endswith(".KS") or tkr.endswith(".KQ"):
         return "domestic"
     if curr and curr in {"USD", "EUR", "JPY", "CNY", "GBP", "AUD", "CAD", "CHF"}:
         return "foreign"
     if "ADR" in upper_name:
         return "foreign"
-    builtin_hint = get_builtin_ticker_hint(name)
-    if builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ"):
-        return "domestic"
     if _company_name_has_hangul(name):
         if _looks_explicit_foreign_company_name(name):
             return "foreign"
@@ -7304,6 +7343,13 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">기업정보</div>', unsafe_allow_html=True)
 
+    corrected_builtin = reconcile_builtin_ticker_overrides()
+    if corrected_builtin > 0:
+        st.session_state["analysis_builtin_reconcile_notice"] = (
+            f"내장 힌트 기준 티커 자동 교정: {corrected_builtin}개"
+        )
+        st.rerun()
+
     analysis_all = load_company_analysis_history()
     company_list_df = load_company_list()
     stock_names = get_holding_stock_names(current_df)
@@ -7368,6 +7414,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_ticker"] = next_ticker
     if "analysis_ticker_autofill_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_ticker_autofill_notice"))
+    if "analysis_builtin_reconcile_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_builtin_reconcile_notice"))
     for key in [
         "analysis_company_overview",
         "analysis_products_services",
@@ -7597,6 +7645,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     sector_map = {}
     price_map = {}
     source_map = {}
+    first_created_map = {}
     if not company_list_df.empty:
         for _, row in company_list_df.iterrows():
             nm = str(row.get("stock_name") or "").strip()
@@ -7608,6 +7657,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             if price_val is not None and price_val > 0:
                 price_map[nm] = float(price_val)
             source_map[nm] = str(row.get("source") or "").strip() or "manual"
+            created_text = str(row.get("created_at") or "").strip()
+            first_created_map[nm] = created_text[:10] if len(created_text) >= 10 else created_text
     overview_rows = []
     for nm in sorted(holding_set | listed_set):
         tags = []
@@ -7621,6 +7672,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 "티커": ticker_map.get(nm, ""),
                 "산업섹터": sector_map.get(nm, ""),
                 "현재주가(원화)": price_map.get(nm),
+                "최초등록일": first_created_map.get(nm, ""),
                 "구분": ", ".join(tags),
                 "리스트소스": source_map.get(nm, ""),
             }
@@ -7652,8 +7704,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             if _company_name_has_hangul(company_name) and _looks_domestic_company_name_hint(company_name):
                 market_pref = "domestic"
             builtin_hint = get_builtin_ticker_hint(company_name)
-            if builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ"):
-                market_pref = "domestic"
+            if builtin_hint:
+                market_pref = "domestic" if (builtin_hint.endswith(".KS") or builtin_hint.endswith(".KQ")) else "foreign"
             if not market_pref:
                 if row_ticker:
                     if not force_refresh:
@@ -7677,6 +7729,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 if suspicious:
                     current_ticker = ""
                     next_ticker = ""
+
+            if builtin_hint and _ticker_matches_market_preference(builtin_hint, market_pref):
+                next_ticker = builtin_hint
 
             if not next_ticker:
                 auto_ticker, _ = resolve_ticker_auto_with_retry(
@@ -10086,6 +10141,11 @@ def main() -> None:
         st.session_state["editing_df"] = ensure_portfolio_columns(
             st.session_state["editing_df"], usd_krw_rate, force_usd_rate=True
         )
+
+    corrected_builtin_global = reconcile_builtin_ticker_overrides()
+    if corrected_builtin_global > 0:
+        st.session_state["github_sync_notice"] = f"내장 티커 자동 교정 완료: {corrected_builtin_global}개"
+        st.rerun()
 
     tab_dashboard, tab_input, tab_fx, tab_info, tab_compare, tab_company, tab_api = st.tabs(
         ["대시보드", "기록 입력", "환율", "기업정보", "기업분석", "기업 점수", "API 설정"]
