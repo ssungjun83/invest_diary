@@ -1259,9 +1259,10 @@ def delete_snapshot_by_date(
 
     latest_date_text, latest_df = load_latest_snapshot()
     if latest_df.empty:
-        return True, msg + " / GitHub 동기화 대상 스냅샷이 없습니다."
-
-    target_date = _safe_parse_date(latest_date_text) or snapshot_date
+        target_date = snapshot_date
+        latest_df = empty_portfolio_df()
+    else:
+        target_date = _safe_parse_date(latest_date_text) or snapshot_date
     sync_ok, sync_msg = sync_snapshot_to_github_excel(target_date, latest_df)
     if sync_msg:
         msg += f" / GitHub {'완료' if sync_ok else '경고'}: {sync_msg}"
@@ -6092,6 +6093,68 @@ def upload_excel_bytes_to_github(
         return False, f"GitHub 업로드 실패: {exc}"
 
 
+def load_all_snapshots_for_export() -> pd.DataFrame:
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                snapshot_date AS snapshot_date,
+                stock_name AS stock_name,
+                quantity AS quantity,
+                COALESCE(currency, 'KRW') AS currency,
+                COALESCE(fx_rate, 1) AS fx_rate,
+                market_value AS market_value,
+                pnl_value AS pnl_value,
+                pnl_pct AS pnl_pct,
+                created_at AS created_at
+            FROM snapshots
+            ORDER BY snapshot_date, market_value DESC, stock_name
+            """,
+            conn,
+        )
+    finally:
+        conn.close()
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=[
+                "snapshot_date",
+                "stock_name",
+                "quantity",
+                "currency",
+                "fx_rate",
+                "market_value",
+                "pnl_value",
+                "pnl_pct",
+                "created_at",
+            ]
+        )
+    return df
+
+
+def load_all_snapshot_cash_for_export() -> pd.DataFrame:
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                snapshot_date AS snapshot_date,
+                COALESCE(cash_krw, 0) AS cash_krw,
+                COALESCE(cash_usd, 0) AS cash_usd,
+                created_at AS created_at,
+                updated_at AS updated_at
+            FROM snapshot_cash
+            ORDER BY snapshot_date
+            """,
+            conn,
+        )
+    finally:
+        conn.close()
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["snapshot_date", "cash_krw", "cash_usd", "created_at", "updated_at"])
+    return df
+
+
 def build_portfolio_excel_bytes(snapshot_date: date, holdings_df: pd.DataFrame) -> bytes:
     usd_krw_rate = float(get_usd_krw_rate_for_date(snapshot_date)[0])
     view = ensure_portfolio_columns(holdings_df, usd_krw_rate, force_usd_rate=True).copy()
@@ -6111,11 +6174,15 @@ def build_portfolio_excel_bytes(snapshot_date: date, holdings_df: pd.DataFrame) 
             }
         ]
     )
+    snapshot_rows = load_all_snapshots_for_export()
+    cash_rows = load_all_snapshot_cash_for_export()
 
     out = BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         export_df.to_excel(writer, sheet_name="보유현황", index=False)
         meta_df.to_excel(writer, sheet_name="메타", index=False)
+        snapshot_rows.to_excel(writer, sheet_name="스냅샷_보유현황", index=False)
+        cash_rows.to_excel(writer, sheet_name="스냅샷_예수금", index=False)
     return out.getvalue()
 
 
@@ -6136,7 +6203,7 @@ def sync_snapshot_to_github_excel(snapshot_date: date, holdings_df: pd.DataFrame
         f"auto: portfolio snapshot {snapshot_date.isoformat()} "
         f"({datetime.now().isoformat(timespec='seconds')})"
     )
-    return upload_excel_bytes_to_github(
+    ok, msg = upload_excel_bytes_to_github(
         repo=repo,
         path=excel_path,
         branch=branch,
@@ -6144,6 +6211,15 @@ def sync_snapshot_to_github_excel(snapshot_date: date, holdings_df: pd.DataFrame
         excel_bytes=excel_bytes,
         commit_message=msg,
     )
+    if ok:
+        try:
+            st.session_state["uploaded_portfolio_excel_bytes"] = excel_bytes
+            file_name = excel_path.split("/")[-1] if "/" in excel_path else excel_path
+            st.session_state["uploaded_portfolio_excel_name"] = f"github:{file_name}"
+            st.session_state["uploaded_portfolio_excel_sig"] = hashlib.sha256(excel_bytes).hexdigest()
+        except Exception:
+            pass
+    return ok, msg
 
 
 def bootstrap_excel_from_github_if_needed() -> None:
