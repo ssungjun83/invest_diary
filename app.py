@@ -1418,18 +1418,6 @@ def save_snapshot_cash(snapshot_date: date, cash_krw: float | None, cash_usd: fl
     finally:
         conn.close()
 
-    if not sync_to_github:
-        return False, ""
-
-    sync_ok, sync_msg = sync_snapshot_to_github_excel(snapshot_date, df)
-    if sync_msg:
-        prefix = f"[{sync_reason}] " if sync_reason else ""
-        try:
-            st.session_state["github_sync_notice"] = prefix + sync_msg
-        except Exception:
-            pass
-    return sync_ok, sync_msg
-
 
 def load_snapshot_cash(snapshot_date: date) -> tuple[float, float]:
     conn = get_conn()
