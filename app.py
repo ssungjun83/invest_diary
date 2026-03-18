@@ -1442,9 +1442,12 @@ def load_snapshot(snapshot_date: date) -> pd.DataFrame:
         if not df.empty:
             return df
 
-    excel_df = load_portfolio_from_excel()
-    if not excel_df.empty:
-        return excel_df
+    # 과거 날짜 조회에서는 없는 날짜를 엑셀 최신값으로 대체하지 않는다.
+    # (선택일 기준 기록 혼선 방지)
+    if snapshot_date >= date.today():
+        excel_df = load_portfolio_from_excel()
+        if not excel_df.empty:
+            return excel_df
 
     return empty_portfolio_df()
 
@@ -1475,6 +1478,18 @@ def load_latest_snapshot() -> tuple[str | None, pd.DataFrame]:
         """
         df = pd.read_sql_query(query, conn, params=(latest_date,))
         return latest_date, df
+    finally:
+        conn.close()
+
+
+def has_snapshot_on_date(snapshot_date: date) -> bool:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM snapshots WHERE snapshot_date = ? LIMIT 1",
+            (snapshot_date.isoformat(),),
+        ).fetchone()
+        return bool(row)
     finally:
         conn.close()
 
@@ -1638,6 +1653,10 @@ def load_history(as_of_date: date | None = None) -> pd.DataFrame:
         return hist_df
 
     hist_df = hist_df.sort_values("snapshot_date")
+    if as_of_date is not None:
+        hist_df = hist_df[hist_df["snapshot_date"] <= pd.Timestamp(as_of_date)].copy()
+        if hist_df.empty:
+            return hist_df
     hist_df["is_carry_forward"] = False
     anchor_date = as_of_date or date.today()
     today_ts = pd.Timestamp(anchor_date)
@@ -7347,9 +7366,14 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
 
     featured_hist = pd.DataFrame()
 
-    _, latest_df = load_latest_snapshot()
+    asof_latest_date = get_latest_snapshot_date_on_or_before(selected_date)
+    if asof_latest_date is not None:
+        latest_df = load_snapshot(asof_latest_date)
+    else:
+        latest_df = empty_portfolio_df()
     source_df = current_df if not current_df.empty else latest_df
     summary_available = not source_df.empty
+    exact_snapshot_exists = has_snapshot_on_date(selected_date)
 
     total_value = 0.0
     total_pnl = 0.0
@@ -7378,6 +7402,14 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             render_summary_card("총 수익률", format_signed_pct(total_return), f"총원금 {format_won(total_principal)}", value_class(total_return))
         with c4:
             render_summary_card("현재 예수금", format_won(cash_total_krw), f"원화 {cash_krw:,.0f}원 / 달러 {format_usd(cash_usd)}")
+        if not exact_snapshot_exists:
+            if asof_latest_date is not None:
+                st.caption(
+                    f"선택일 {selected_date.isoformat()} 스냅샷이 없어 "
+                    f"{asof_latest_date.isoformat()} 기준 데이터를 승계 표시했습니다."
+                )
+            elif selected_date >= date.today() and not current_df.empty:
+                st.caption("선택일 스냅샷이 없어 현재 엑셀 입력값으로 임시 표시 중입니다.")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
