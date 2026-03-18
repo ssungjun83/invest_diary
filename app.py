@@ -6692,10 +6692,10 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
                 if trace.name == "total_value":
                     trace.update(
                         name="총평가금액",
-                        line={"width": 3, "color": "#0f766e"},
-                        marker={"size": 8, "color": "#0f766e"},
+                        line={"width": 3, "color": "#dc2626"},
+                        marker={"size": 8, "color": "#dc2626"},
                         fill="tozeroy",
-                        fillcolor="rgba(16,185,129,0.24)",
+                        fillcolor="rgba(239,68,68,0.22)",
                     )
                 else:
                     trace.update(
