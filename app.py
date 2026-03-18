@@ -1171,6 +1171,50 @@ def save_snapshot(
     return sync_ok, sync_msg
 
 
+def delete_snapshot_by_date(
+    snapshot_date: date,
+    delete_cash: bool = True,
+    sync_to_github: bool = True,
+) -> tuple[bool, str]:
+    date_str = snapshot_date.isoformat()
+    conn = get_conn()
+    try:
+        deleted_snapshot_rows = conn.execute(
+            "DELETE FROM snapshots WHERE snapshot_date = ?",
+            (date_str,),
+        ).rowcount
+        deleted_cash_rows = 0
+        if delete_cash:
+            deleted_cash_rows = conn.execute(
+                "DELETE FROM snapshot_cash WHERE snapshot_date = ?",
+                (date_str,),
+            ).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+
+    if int(deleted_snapshot_rows or 0) <= 0 and int(deleted_cash_rows or 0) <= 0:
+        return False, f"{date_str}에 삭제할 기록이 없습니다."
+
+    msg = f"{date_str} 기록 삭제 완료 (보유현황 {int(deleted_snapshot_rows or 0)}건"
+    if delete_cash:
+        msg += f", 예수금 {int(deleted_cash_rows or 0)}건"
+    msg += ")"
+
+    if not sync_to_github:
+        return True, msg
+
+    latest_date_text, latest_df = load_latest_snapshot()
+    if latest_df.empty:
+        return True, msg + " / GitHub 동기화 대상 스냅샷이 없습니다."
+
+    target_date = _safe_parse_date(latest_date_text) or snapshot_date
+    sync_ok, sync_msg = sync_snapshot_to_github_excel(target_date, latest_df)
+    if sync_msg:
+        msg += f" / GitHub {'완료' if sync_ok else '경고'}: {sync_msg}"
+    return True, msg
+
+
 def empty_portfolio_df() -> pd.DataFrame:
     return pd.DataFrame(columns=COLUMNS)
 
@@ -7429,6 +7473,43 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
         use_container_width=True,
         hide_index=True,
     )
+    all_snapshot_dates = sorted(
+        pd.to_datetime(hist_df["snapshot_date"], errors="coerce").dropna().dt.date.unique().tolist(),
+        reverse=True,
+    )
+    if all_snapshot_dates:
+        del_col1, del_col2, del_col3 = st.columns([1.2, 0.8, 1.4])
+        with del_col1:
+            st.selectbox(
+                "삭제할 기록 날짜",
+                options=all_snapshot_dates,
+                key="dashboard_delete_snapshot_date",
+                format_func=lambda d: d.isoformat() if hasattr(d, "isoformat") else str(d),
+            )
+        with del_col2:
+            st.checkbox("삭제 확인", key="dashboard_delete_snapshot_confirm")
+        with del_col3:
+            delete_snapshot_btn = st.button("선택 날짜 기록 삭제", key="dashboard_delete_snapshot_btn")
+
+        if delete_snapshot_btn:
+            target_date = st.session_state.get("dashboard_delete_snapshot_date")
+            confirmed = bool(st.session_state.get("dashboard_delete_snapshot_confirm", False))
+            parsed_date = target_date if isinstance(target_date, date) else _safe_parse_date(target_date)
+            if not parsed_date:
+                st.warning("삭제할 날짜를 선택해 주세요.")
+            elif not confirmed:
+                st.warning("삭제 확인을 체크해 주세요.")
+            else:
+                ok, msg = delete_snapshot_by_date(
+                    parsed_date,
+                    delete_cash=True,
+                    sync_to_github=True,
+                )
+                st.session_state["dashboard_delete_snapshot_confirm"] = False
+                if ok:
+                    st.session_state["github_sync_notice"] = msg
+                    st.rerun()
+                st.warning(msg)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
