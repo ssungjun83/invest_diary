@@ -6658,6 +6658,31 @@ def auto_balance_yaxis(fig):
     return fig
 
 
+def build_zero_based_y_range(values, headroom_ratio: float = 0.12) -> list[float] | None:
+    numeric = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if numeric.empty:
+        return None
+
+    y_min = float(numeric.min())
+    y_max = float(numeric.max())
+
+    if y_min >= 0:
+        upper = y_max * (1.0 + float(headroom_ratio))
+        if upper <= 0:
+            upper = 1.0
+        return [0.0, float(upper)]
+
+    if y_max <= 0:
+        lower = y_min * (1.0 + float(headroom_ratio))
+        if lower >= 0:
+            lower = -1.0
+        return [float(lower), 0.0]
+
+    span = y_max - y_min
+    pad = max(span * float(headroom_ratio), 0.5)
+    return [float(y_min - pad), float(y_max + pad)]
+
+
 def style_figure(fig):
     fig.update_layout(
         template="plotly_white",
@@ -7280,6 +7305,9 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             color_continuous_scale=[(0.0, "#1570ef"), (0.5, "#94a3b8"), (1.0, "#d92d20")],
         )
         pnl_fig.update_coloraxes(showscale=False)
+        pnl_range = build_zero_based_y_range(featured_hist["total_pnl"], headroom_ratio=0.15)
+        if pnl_range:
+            pnl_fig.update_yaxes(range=pnl_range, tickformat=",")
         add_bar_labels(pnl_fig, pct=False)
         st.plotly_chart(style_figure(apply_daily_date_axis(pnl_fig)), use_container_width=True)
 
@@ -7293,6 +7321,9 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             labels={"snapshot_date": "날짜", "total_return_pct": "수익률(%)"},
             color_discrete_sequence=["#1d4ed8"],
         )
+        ret_range = build_zero_based_y_range(featured_hist["total_return_pct"], headroom_ratio=0.18)
+        if ret_range:
+            return_fig.update_yaxes(range=ret_range)
         return_fig.update_yaxes(tickformat=",.0f", ticksuffix="%")
         add_line_labels(return_fig, pct=True, last_only=False)
         st.plotly_chart(style_figure(apply_daily_date_axis(return_fig)), use_container_width=True)
