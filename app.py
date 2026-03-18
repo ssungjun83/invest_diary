@@ -8811,10 +8811,51 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     )
                     updated_count += 1
 
+            auto_save_suffix = ""
+            auto_save_warn = ""
             if updated_count > 0:
-                st.session_state["analysis_bulk_price_notice"] = f"현재 주가 업데이트 완료: {updated_count}개"
+                try:
+                    target_date_text = str(st.session_state.get("editing_df_date", "") or "").strip()
+                    target_date = _safe_parse_date(target_date_text) or date.today()
+                    session_df = st.session_state.get("editing_df", pd.DataFrame())
+                    if isinstance(session_df, pd.DataFrame) and not session_df.empty:
+                        usd_rate, _ = get_usd_krw_rate_for_date(target_date)
+                        refreshed_company_df = load_company_list()
+                        price_exact, price_norm = build_company_price_krw_maps(refreshed_company_df)
+                        recalced_df = recalculate_portfolio_from_price_and_avg_buy(
+                            ensure_portfolio_columns(session_df.copy(), usd_rate, force_usd_rate=True),
+                            usd_rate,
+                            company_price_exact=price_exact,
+                            company_price_norm=price_norm,
+                        )
+                        sync_ok, sync_msg = save_snapshot(
+                            target_date,
+                            recalced_df,
+                            sync_to_github=True,
+                            sync_reason="price_refresh_auto_save",
+                        )
+                        st.session_state["editing_df"] = recalced_df
+                        st.session_state["editing_df_date"] = target_date.isoformat()
+                        if sync_msg:
+                            auto_save_suffix = f" / 스냅샷 저장·GitHub 동기화 {'완료' if sync_ok else '경고'}"
+                        else:
+                            auto_save_suffix = " / 스냅샷 자동 저장 완료"
+                    else:
+                        latest_date_text, latest_df = load_latest_snapshot()
+                        if latest_df is not None and not latest_df.empty:
+                            target_date2 = _safe_parse_date(latest_date_text) or date.today()
+                            sync_ok, sync_msg = sync_snapshot_to_github_excel(target_date2, latest_df)
+                            if sync_msg:
+                                auto_save_suffix = f" / GitHub 동기화 {'완료' if sync_ok else '경고'}"
+                except Exception as exc:
+                    auto_save_warn = f"주가 갱신 후 자동 저장 실패: {exc}"
+
+            if updated_count > 0:
+                st.session_state["analysis_bulk_price_notice"] = f"현재 주가 업데이트 완료: {updated_count}개{auto_save_suffix}"
             else:
                 st.session_state["analysis_bulk_price_notice"] = "현재 주가를 새로 업데이트하지 못했습니다."
+            if auto_save_warn:
+                failed_details.append(auto_save_warn)
             if failed_details:
                 preview = ", ".join(failed_details[:5])
                 remain = len(failed_details) - min(5, len(failed_details))
