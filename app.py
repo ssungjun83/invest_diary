@@ -6024,7 +6024,8 @@ def initialize_api_settings(force: bool = False) -> None:
     global_finnhub_key = settings.get("finnhub_api_key", "") if store_sensitive else ""
     global_openai_model = settings.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL
     global_claude_model = settings.get("claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL
-    github_sync_enabled = _to_bool_flag(settings.get("github_sync_enabled", "false"))
+    github_sync_enabled_raw = str(settings.get("github_sync_enabled", "false") or "false").strip()
+    github_sync_enabled = _to_bool_flag(github_sync_enabled_raw)
     github_sync_on_change = _to_bool_flag(settings.get("github_sync_on_change", "true"))
     github_repo = settings.get("github_repo", "")
     github_branch = settings.get("github_branch", "main") or "main"
@@ -6049,6 +6050,15 @@ def initialize_api_settings(force: bool = False) -> None:
     global_alpha_key = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or global_alpha_key
     global_finnhub_key = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or global_finnhub_key
     github_token = _read_first_secret_or_env(["GITHUB_TOKEN", "GH_TOKEN"]) or github_token
+    github_repo = _read_first_secret_or_env(["GITHUB_REPO", "GLOBAL_GITHUB_REPO"]) or github_repo
+    github_branch = _read_first_secret_or_env(["GITHUB_BRANCH", "GLOBAL_GITHUB_BRANCH"]) or github_branch
+    github_excel_path = _read_first_secret_or_env(["GITHUB_EXCEL_PATH", "GLOBAL_GITHUB_EXCEL_PATH"]) or github_excel_path
+    github_sync_enabled_secret = _read_first_secret_or_env(["GITHUB_SYNC_ENABLED", "GLOBAL_GITHUB_SYNC_ENABLED"])
+    if github_sync_enabled_secret:
+        github_sync_enabled = _to_bool_flag(github_sync_enabled_secret)
+    elif not github_sync_enabled_raw:
+        # 설정 DB가 비어 있는 새 환경에서는 repo/path/token이 있으면 자동으로 활성화한다.
+        github_sync_enabled = bool(github_repo and github_excel_path and github_token)
 
     global_map = {
         "store_sensitive_keys": store_sensitive,

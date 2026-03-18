@@ -61,3 +61,13 @@ python daily_auto_snapshot.py --force
 
 If you need API keys in deployed environment, configure them in Streamlit Cloud `Secrets`.
 Also set app password in `Secrets` using `APP_PASSWORD` or `APP_PASSWORD_HASH`.
+
+To keep GitHub auto-load/save working after Cloud restart, set these Secrets too:
+
+```toml
+GITHUB_SYNC_ENABLED = "true"
+GITHUB_REPO = "owner/repo"
+GITHUB_BRANCH = "main"
+GITHUB_EXCEL_PATH = "portfolio_auto.xlsx"
+GITHUB_TOKEN = "ghp_..."
+```
