@@ -6232,6 +6232,13 @@ def style_market_summary_table(df: pd.DataFrame):
 
 
 def auto_balance_yaxis(fig):
+    # 이미 명시 범위가 지정된 그래프는 자동 스케일 재조정을 건너뛴다.
+    yaxis = getattr(fig.layout, "yaxis", None)
+    if yaxis is not None:
+        fixed_range = getattr(yaxis, "range", None)
+        if fixed_range and len(fixed_range) == 2 and fixed_range[0] is not None and fixed_range[1] is not None:
+            return fig
+
     y_series = []
     for trace in fig.data:
         y_vals = getattr(trace, "y", None)
@@ -6672,10 +6679,33 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
                 labels={"snapshot_date": "날짜", "value": "금액(원)", "variable": "지표"},
                 color_discrete_sequence=["#0f766e", "#334155"],
             )
-            core_line_fig.for_each_trace(
-                lambda t: t.update(name="총평가금액" if t.name == "total_value" else "총원금")
+            y_max_raw = float(
+                max(
+                    pd.to_numeric(featured_hist["total_value"], errors="coerce").max(),
+                    pd.to_numeric(featured_hist["total_principal"], errors="coerce").max(),
+                    0.0,
+                )
             )
-            core_line_fig.update_traces(line={"width": 3}, marker={"size": 8})
+            y_axis_max = y_max_raw * 1.12 if y_max_raw > 0 else 1.0
+
+            for trace in core_line_fig.data:
+                if trace.name == "total_value":
+                    trace.update(
+                        name="총평가금액",
+                        line={"width": 3},
+                        marker={"size": 8},
+                        fill="tozeroy",
+                        fillcolor="rgba(15,118,110,0.22)",
+                    )
+                else:
+                    trace.update(
+                        name="총원금",
+                        line={"width": 3},
+                        marker={"size": 8},
+                        fill="tozeroy",
+                        fillcolor="rgba(51,65,85,0.16)",
+                    )
+            core_line_fig.update_yaxes(range=[0, y_axis_max], tickformat=",")
             add_line_labels(core_line_fig, pct=False, last_only=False)
             st.plotly_chart(style_figure(apply_daily_date_axis(core_line_fig)), use_container_width=True)
 
