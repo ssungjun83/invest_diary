@@ -1115,6 +1115,14 @@ def save_snapshot(
     finally:
         conn.close()
 
+    # 스냅샷 저장일의 예수금 행이 없으면 직전 저장값을 승계해 생성한다.
+    # (그래프/요약 간 예수금 포함 기준 불일치를 방지)
+    try:
+        carry_cash_krw, carry_cash_usd = load_snapshot_cash(snapshot_date)
+        save_snapshot_cash(snapshot_date, carry_cash_krw, carry_cash_usd)
+    except Exception:
+        pass
+
     if not sync_to_github:
         return False, ""
 
@@ -1479,6 +1487,7 @@ def load_history(as_of_date: date | None = None) -> pd.DataFrame:
 
     if not cash_df.empty:
         cash_df["snapshot_date"] = pd.to_datetime(cash_df["snapshot_date"])
+        cash_df = cash_df.sort_values("snapshot_date")
         cash_dates = sorted(cash_df["snapshot_date"].dt.date.unique().tolist())
         cash_rate_map = {d: get_usd_krw_rate_for_date(d)[0] for d in cash_dates}
         cash_df["usd_krw_rate"] = cash_df["snapshot_date"].dt.date.map(cash_rate_map).astype(float)
@@ -1490,11 +1499,18 @@ def load_history(as_of_date: date | None = None) -> pd.DataFrame:
             hist_df["cash_krw"] = hist_df["cash_krw"].fillna(0.0)
             hist_df["cash_usd"] = hist_df["cash_usd"].fillna(0.0)
         else:
-            hist_df = hist_df.merge(cash_df, on="snapshot_date", how="outer")
-            hist_df["total_value"] = hist_df["total_value"].fillna(0.0) + hist_df["cash_total_krw"].fillna(0.0)
-            hist_df["total_pnl"] = hist_df["total_pnl"].fillna(0.0)
+            # 스냅샷 날짜별 예수금은 동일일이 없더라도 직전값(<=날짜)을 승계 적용한다.
+            hist_df = pd.merge_asof(
+                hist_df.sort_values("snapshot_date"),
+                cash_df.sort_values("snapshot_date"),
+                on="snapshot_date",
+                direction="backward",
+            )
+            hist_df["cash_total_krw"] = hist_df["cash_total_krw"].fillna(0.0)
             hist_df["cash_krw"] = hist_df["cash_krw"].fillna(0.0)
             hist_df["cash_usd"] = hist_df["cash_usd"].fillna(0.0)
+            hist_df["total_value"] = hist_df["total_value"].fillna(0.0) + hist_df["cash_total_krw"]
+            hist_df["total_pnl"] = hist_df["total_pnl"].fillna(0.0)
         if "cash_total_krw" in hist_df.columns:
             hist_df = hist_df.drop(columns=["cash_total_krw"])
 
