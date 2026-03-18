@@ -14,6 +14,7 @@ from urllib.parse import unquote
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import ast
 import json
 import re
 import requests
@@ -3538,7 +3539,7 @@ def extract_holdings_from_image_with_ai(
 
     parsed = _extract_json_from_text(text)
     if not parsed:
-        return {}, "AI 응답에서 JSON을 파싱하지 못했습니다."
+        return {}, f"AI 응답에서 JSON을 파싱하지 못했습니다. 원인: {_json_parse_failure_reason(text)}"
     if isinstance(parsed, list):
         parsed = {"as_of_date": "", "holdings": parsed}
     return parsed, ""
@@ -3663,7 +3664,7 @@ def extract_company_watchlist_from_image_with_ai(
 
     parsed = _extract_json_from_text(text)
     if not parsed:
-        return [], "AI 응답에서 JSON을 파싱하지 못했습니다."
+        return [], f"AI 응답에서 JSON을 파싱하지 못했습니다. 원인: {_json_parse_failure_reason(text)}"
 
     raw_items = []
     if isinstance(parsed, list):
@@ -3997,22 +3998,89 @@ def load_company_score_history() -> pd.DataFrame:
     return df
 
 
-def _extract_json_from_text(text: str) -> dict | None:
+def _json_parse_failure_reason(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "AI 응답이 비어 있습니다."
+    if ("```" in raw and ("{" in raw or "[" in raw)) or ("\n" in raw and not raw.startswith("{")):
+        cause = "코드블록/설명문이 JSON과 함께 섞여 있습니다."
+    elif ("{" not in raw) and ("[" not in raw):
+        cause = "JSON 시작 괄호({ 또는 [)가 없습니다."
+    else:
+        cause = "따옴표/쉼표/괄호 형식이 JSON 규격과 다릅니다."
+    preview = re.sub(r"\s+", " ", raw)[:220]
+    return f"{cause} 응답 일부: {preview}"
+
+
+def _extract_json_from_text(text: str) -> dict | list | None:
     raw = (text or "").strip()
     if not raw:
         return None
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
 
-    match = re.search(r"\{.*\}", raw, re.S)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except Exception:
-        return None
+    def _balanced_chunks(src: str, open_ch: str, close_ch: str) -> list[str]:
+        out: list[str] = []
+        in_str = False
+        escaped = False
+        depth = 0
+        start = -1
+        for i, ch in enumerate(src):
+            if in_str:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == open_ch:
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == close_ch and depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    out.append(src[start : i + 1].strip())
+                    start = -1
+        return out
+
+    candidates: list[str] = [raw]
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, re.I):
+        block = (m.group(1) or "").strip()
+        if block:
+            candidates.append(block)
+
+    candidates.extend(_balanced_chunks(raw, "{", "}"))
+    candidates.extend(_balanced_chunks(raw, "[", "]"))
+
+    seen: set[str] = set()
+    for cand in candidates:
+        c = str(cand or "").strip()
+        if not c or c in seen:
+            continue
+        seen.add(c)
+
+        variants = [
+            c,
+            c.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'"),
+            re.sub(r",\s*([}\]])", r"\1", c),
+        ]
+        for v in variants:
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except Exception:
+                pass
+            try:
+                parsed = ast.literal_eval(v)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except Exception:
+                pass
+    return None
 
 
 def _is_missing_summary_value(value) -> bool:
@@ -4851,7 +4919,7 @@ def generate_company_analysis_with_ai(
 
     parsed = _extract_json_from_text(text)
     if not parsed:
-        return {}, "AI 응답에서 JSON을 파싱하지 못했습니다."
+        return {}, f"AI 응답에서 JSON을 파싱하지 못했습니다. 원인: {_json_parse_failure_reason(text)}"
 
     analysis = {
         "company_overview": _lines_to_text(parsed.get("company_overview")),
@@ -6385,6 +6453,24 @@ def add_line_labels(fig, pct: bool = False, last_only: bool = False, max_labels:
             pos = "top center"
         trace.update(mode="lines+markers+text", text=labels, textposition=pos)
     return fig
+
+
+def estimate_textarea_height(value, min_height: int = 100, max_height: int = 640) -> int:
+    text = str(value or "")
+    lines = text.splitlines() or [""]
+    virtual_lines = 0
+    for line in lines:
+        line_len = len(str(line))
+        # 한 줄이 길면 실제 렌더에서 줄바꿈되므로 가상 라인을 늘려 내부 스크롤을 줄인다.
+        virtual_lines += max(1, (line_len // 42) + 1)
+    height = 42 + virtual_lines * 24
+    return int(max(min_height, min(max_height, height)))
+
+
+def estimate_dataframe_height(df: pd.DataFrame, min_height: int = 180, max_height: int = 3600) -> int:
+    row_count = len(df.index) if isinstance(df, pd.DataFrame) else 0
+    height = 42 + max(1, row_count) * 35
+    return int(max(min_height, min(max_height, height)))
 
 
 def add_bar_labels(fig, pct: bool = False, max_labels: int = 10):
@@ -7987,9 +8073,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         current_input_name = (st.session_state.get("analysis_company_name_input") or "").strip()
         current_input_ticker = clean_valid_ticker(st.session_state.get("analysis_ticker_input") or "")
         selected_rows = []
+        overview_height = estimate_dataframe_height(overview_view_df, min_height=260, max_height=4000)
         try:
             table_event = st.dataframe(
                 overview_view_df,
+                height=overview_height,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -8005,7 +8093,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             except Exception:
                 selected_rows = []
         except TypeError:
-            st.dataframe(overview_df, use_container_width=True, hide_index=True)
+            st.dataframe(overview_view_df, height=overview_height, use_container_width=True, hide_index=True)
 
         selected_names = []
         if selected_rows:
@@ -8434,12 +8522,36 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             st.success(f"{company_name} 기업 분석 생성/저장을 완료했습니다.")
 
     st.markdown("#### 기업 분석 내용")
-    st.text_area("기업 개요", key="analysis_company_overview", height=110)
-    st.text_area("핵심 제품/서비스", key="analysis_products_services", height=100)
-    st.text_area("핵심 원재료/투입요소", key="analysis_raw_materials", height=100)
-    st.text_area("이익 증가 요인", key="analysis_profit_up_factors", height=120)
-    st.text_area("이익 감소 요인(리스크)", key="analysis_profit_down_factors", height=120)
-    st.text_area("요약 메모", key="analysis_key_takeaway", height=90)
+    st.text_area(
+        "기업 개요",
+        key="analysis_company_overview",
+        height=estimate_textarea_height(st.session_state.get("analysis_company_overview", ""), min_height=130),
+    )
+    st.text_area(
+        "핵심 제품/서비스",
+        key="analysis_products_services",
+        height=estimate_textarea_height(st.session_state.get("analysis_products_services", ""), min_height=120),
+    )
+    st.text_area(
+        "핵심 원재료/투입요소",
+        key="analysis_raw_materials",
+        height=estimate_textarea_height(st.session_state.get("analysis_raw_materials", ""), min_height=120),
+    )
+    st.text_area(
+        "이익 증가 요인",
+        key="analysis_profit_up_factors",
+        height=estimate_textarea_height(st.session_state.get("analysis_profit_up_factors", ""), min_height=140),
+    )
+    st.text_area(
+        "이익 감소 요인(리스크)",
+        key="analysis_profit_down_factors",
+        height=estimate_textarea_height(st.session_state.get("analysis_profit_down_factors", ""), min_height=140),
+    )
+    st.text_area(
+        "요약 메모",
+        key="analysis_key_takeaway",
+        height=estimate_textarea_height(st.session_state.get("analysis_key_takeaway", ""), min_height=110),
+    )
 
     if manual_save_btn:
         company_name = analysis_company_name_value
@@ -8519,8 +8631,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         }
     )
     st.caption("저장된 기업 리스트 (최신 분석 기준)")
+    company_list_view_df = company_list_view[["기업명", "티커", "최근분석일", "생성방식", "모델"]]
     st.dataframe(
-        company_list_view[["기업명", "티커", "최근분석일", "생성방식", "모델"]],
+        company_list_view_df,
+        height=estimate_dataframe_height(company_list_view_df, min_height=220, max_height=2200),
         use_container_width=True,
         hide_index=True,
     )
@@ -8548,12 +8662,48 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     latest = target_df.iloc[int(selected_idx)]
     financial = parse_financial_summary_json(latest.get("financial_summary_json"))
     st.caption("선택 이력 분석 내용")
-    st.text_area("기업 개요(저장본)", value=latest.get("company_overview") or "", height=110, disabled=True)
-    st.text_area("핵심 제품/서비스(저장본)", value=latest.get("products_services") or "", height=100, disabled=True)
-    st.text_area("핵심 원재료/투입요소(저장본)", value=latest.get("raw_materials") or "", height=100, disabled=True)
-    st.text_area("이익 증가 요인(저장본)", value=latest.get("profit_up_factors") or "", height=120, disabled=True)
-    st.text_area("이익 감소 요인(저장본)", value=latest.get("profit_down_factors") or "", height=120, disabled=True)
-    st.text_area("요약 메모(저장본)", value=latest.get("note") or "", height=90, disabled=True)
+    latest_overview = latest.get("company_overview") or ""
+    latest_products = latest.get("products_services") or ""
+    latest_raw = latest.get("raw_materials") or ""
+    latest_up = latest.get("profit_up_factors") or ""
+    latest_down = latest.get("profit_down_factors") or ""
+    latest_note = latest.get("note") or ""
+    st.text_area(
+        "기업 개요(저장본)",
+        value=latest_overview,
+        height=estimate_textarea_height(latest_overview, min_height=130),
+        disabled=True,
+    )
+    st.text_area(
+        "핵심 제품/서비스(저장본)",
+        value=latest_products,
+        height=estimate_textarea_height(latest_products, min_height=120),
+        disabled=True,
+    )
+    st.text_area(
+        "핵심 원재료/투입요소(저장본)",
+        value=latest_raw,
+        height=estimate_textarea_height(latest_raw, min_height=120),
+        disabled=True,
+    )
+    st.text_area(
+        "이익 증가 요인(저장본)",
+        value=latest_up,
+        height=estimate_textarea_height(latest_up, min_height=140),
+        disabled=True,
+    )
+    st.text_area(
+        "이익 감소 요인(저장본)",
+        value=latest_down,
+        height=estimate_textarea_height(latest_down, min_height=140),
+        disabled=True,
+    )
+    st.text_area(
+        "요약 메모(저장본)",
+        value=latest_note,
+        height=estimate_textarea_height(latest_note, min_height=110),
+        disabled=True,
+    )
 
     metric_keys = [
         ("market_cap", "시가총액"),
@@ -8578,22 +8728,46 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             metric_rows.append({"항목": label, "값": financial.get(key)})
     if metric_rows:
         st.caption("핵심 재무 지표")
-        st.dataframe(format_table_numbers(pd.DataFrame(metric_rows)), use_container_width=True, hide_index=True)
+        metric_df = format_table_numbers(pd.DataFrame(metric_rows))
+        st.dataframe(
+            metric_df,
+            height=estimate_dataframe_height(metric_df, min_height=180, max_height=1400),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     income_rows = financial.get("income_statement_annual") if isinstance(financial, dict) else None
     if income_rows:
         st.caption("연간 손익계산서 요약")
-        st.dataframe(format_table_numbers(pd.DataFrame(income_rows)), use_container_width=True, hide_index=True)
+        income_df = format_table_numbers(pd.DataFrame(income_rows))
+        st.dataframe(
+            income_df,
+            height=estimate_dataframe_height(income_df, min_height=180, max_height=2400),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     balance_rows = financial.get("balance_sheet_annual") if isinstance(financial, dict) else None
     if balance_rows:
         st.caption("연간 재무상태표 요약")
-        st.dataframe(format_table_numbers(pd.DataFrame(balance_rows)), use_container_width=True, hide_index=True)
+        balance_df = format_table_numbers(pd.DataFrame(balance_rows))
+        st.dataframe(
+            balance_df,
+            height=estimate_dataframe_height(balance_df, min_height=180, max_height=2400),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     cash_rows = financial.get("cashflow_annual") if isinstance(financial, dict) else None
     if cash_rows:
         st.caption("연간 현금흐름표 요약")
-        st.dataframe(format_table_numbers(pd.DataFrame(cash_rows)), use_container_width=True, hide_index=True)
+        cash_df = format_table_numbers(pd.DataFrame(cash_rows))
+        st.dataframe(
+            cash_df,
+            height=estimate_dataframe_height(cash_df, min_height=180, max_height=2400),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     hist_view = target_df.sort_values(["analysis_date", "updated_at"], ascending=[False, False]).copy()
     hist_view["analysis_date"] = pd.to_datetime(hist_view["analysis_date"]).dt.date
@@ -8608,8 +8782,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         }
     )
     st.caption("분석 이력")
+    hist_view_df = hist_view[["분석일", "기업명", "티커", "생성방식", "모델", "수정시각"]]
     st.dataframe(
-        hist_view[["분석일", "기업명", "티커", "생성방식", "모델", "수정시각"]],
+        hist_view_df,
+        height=estimate_dataframe_height(hist_view_df, min_height=220, max_height=2400),
         use_container_width=True,
         hide_index=True,
     )
