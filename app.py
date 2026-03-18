@@ -6805,7 +6805,7 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
 
     featured_hist = pd.DataFrame()
 
-    latest_date, latest_df = load_latest_snapshot()
+    _, latest_df = load_latest_snapshot()
     source_df = current_df if not current_df.empty else latest_df
     summary_available = not source_df.empty
 
@@ -6816,27 +6816,18 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
     cash_total_krw = 0.0
     cash_krw = 0.0
     cash_usd = 0.0
-    effective_saved_date = None
-    top_stock_name = "-"
-    top_stock_weight = 0.0
-
     if summary_available:
         source_df = to_krw_view(source_df, usd_krw_rate)
         base_date = selected_date
-        effective_saved_date = get_latest_snapshot_date_on_or_before(selected_date)
         total_value, total_pnl, total_principal, total_return = compute_totals(source_df, usd_krw_rate, base_date)
         cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(base_date, None)
-        if total_value > 0:
-            top_row = source_df.loc[source_df[COL_VALUE_KRW].idxmax()]
-            top_stock_name = str(top_row[COL_NAME])
-            top_stock_weight = float(top_row[COL_VALUE_KRW]) / total_value * 100
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">전체 자산 요약</div>', unsafe_allow_html=True)
     if not summary_available:
         st.info("저장된 데이터가 없습니다. 기록 입력 탭에서 먼저 스냅샷을 저장해 주세요.")
     else:
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             render_summary_card("총 평가금액", format_won(total_value), f"보유 종목 {len(source_df)}개")
         with c2:
@@ -6845,18 +6836,6 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             render_summary_card("총 수익률", format_signed_pct(total_return), f"총원금 {format_won(total_principal)}", value_class(total_return))
         with c4:
             render_summary_card("현재 예수금", format_won(cash_total_krw), f"원화 {cash_krw:,.0f}원 / 달러 {format_usd(cash_usd)}")
-        with c5:
-            if effective_saved_date:
-                saved_text = effective_saved_date.isoformat()
-                if effective_saved_date < selected_date:
-                    recent_note = f"최근 저장: {saved_text} (미입력일 승계)"
-                else:
-                    recent_note = f"최근 저장: {saved_text}"
-            elif latest_date:
-                recent_note = f"최근 저장: {latest_date}"
-            else:
-                recent_note = "엑셀 기준 (DB 미저장)"
-            render_summary_card("비중 최대 종목", top_stock_name, f"비중 {top_stock_weight:,.0f}% | {recent_note}")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
