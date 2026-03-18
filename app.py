@@ -7640,6 +7640,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_ticker"] = next_ticker
     if "analysis_ticker_autofill_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_ticker_autofill_notice"))
+    if "analysis_new_company_ticker_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_new_company_ticker_notice"))
     if "analysis_builtin_reconcile_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_builtin_reconcile_notice"))
     for key in [
@@ -7699,7 +7701,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     if "analysis_selected_overview_sector_input" not in st.session_state:
         st.session_state["analysis_selected_overview_sector_input"] = ""
 
-    add_col1, add_col2, add_col3, add_col4 = st.columns([1.3, 1.0, 1.0, 0.8])
+    add_col1, add_col2, add_col3, add_col4, add_col5 = st.columns([1.3, 1.0, 1.0, 0.9, 0.7])
     with add_col1:
         st.text_input("추가 기업명", key="analysis_new_company_name", placeholder="예: 애플")
     with add_col2:
@@ -7707,7 +7709,32 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     with add_col3:
         st.text_input("산업섹터(선택)", key="analysis_new_company_sector", placeholder="예: 철강, 금융")
     with add_col4:
+        lookup_new_company_ticker_btn = st.button("AI 티커 조회", key="analysis_lookup_new_company_ticker_btn")
+    with add_col5:
         add_company_btn = st.button("기업 추가", key="analysis_add_company_btn")
+
+    if lookup_new_company_ticker_btn:
+        lookup_name = (st.session_state.get("analysis_new_company_name") or "").strip()
+        if not lookup_name:
+            st.warning("티커를 조회할 기업명을 먼저 입력해 주세요.")
+        else:
+            analysis_ai_provider, analysis_ai_api_key, analysis_ai_model = get_ai_settings_from_session("analysis")
+            auto_ticker, auto_src = resolve_ticker_auto_with_retry(
+                lookup_name,
+                use_ai=bool((analysis_ai_api_key or "").strip()),
+                api_key=analysis_ai_api_key,
+                model=analysis_ai_model,
+                provider=analysis_ai_provider,
+                market_preference=market_pref_map.get(lookup_name, ""),
+            )
+            auto_ticker = clean_valid_ticker(auto_ticker)
+            if auto_ticker:
+                st.session_state["analysis_new_company_ticker"] = auto_ticker
+                st.session_state["analysis_new_company_ticker_notice"] = (
+                    f"{lookup_name} 티커 자동 입력: {auto_ticker} ({auto_src or '자동 탐색'})"
+                )
+                st.rerun()
+            st.warning(auto_src or "티커를 찾지 못했습니다.")
 
     if add_company_btn:
         new_name = (st.session_state.get("analysis_new_company_name") or "").strip()
