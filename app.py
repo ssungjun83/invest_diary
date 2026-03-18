@@ -5115,14 +5115,80 @@ def generate_company_analysis_with_ai(
     if not parsed:
         return {}, f"AI 응답에서 JSON을 파싱하지 못했습니다. 원인: {_json_parse_failure_reason(text)}"
 
-    analysis = {
-        "company_overview": _lines_to_text(parsed.get("company_overview")),
-        "products_services": _lines_to_text(parsed.get("products_services")),
-        "raw_materials": _lines_to_text(parsed.get("raw_materials")),
-        "profit_up_factors": _lines_to_text(parsed.get("profit_up_factors")),
-        "profit_down_factors": _lines_to_text(parsed.get("profit_down_factors")),
-        "key_takeaway": _lines_to_text(parsed.get("key_takeaway")),
+    analysis_keys = {
+        "company_overview",
+        "products_services",
+        "raw_materials",
+        "profit_up_factors",
+        "profit_down_factors",
+        "key_takeaway",
     }
+
+    def _extract_analysis_obj(value) -> dict:
+        if isinstance(value, dict):
+            nested_candidates = [
+                value,
+                value.get("analysis"),
+                value.get("result"),
+                value.get("data"),
+                value.get("output"),
+                value.get("response"),
+            ]
+            for cand in nested_candidates:
+                if isinstance(cand, dict):
+                    if analysis_keys.intersection(set(cand.keys())):
+                        return cand
+            for cand in nested_candidates:
+                if isinstance(cand, dict):
+                    return cand
+            return {}
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and analysis_keys.intersection(set(item.keys())):
+                    return item
+            for item in value:
+                if isinstance(item, dict):
+                    return item
+        return {}
+
+    parsed_obj = _extract_analysis_obj(parsed)
+    if not parsed_obj:
+        return {}, "AI 응답 JSON 구조가 예상과 달라 분석 항목을 찾지 못했습니다."
+
+    def _pick(obj: dict, *keys):
+        for key in keys:
+            val = obj.get(key)
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+            if isinstance(val, list) and not val:
+                continue
+            return val
+        return None
+
+    analysis = {
+        "company_overview": _lines_to_text(
+            _pick(parsed_obj, "company_overview", "overview", "companyOverview", "기업개요")
+        ),
+        "products_services": _lines_to_text(
+            _pick(parsed_obj, "products_services", "products", "services", "productsServices", "핵심제품서비스")
+        ),
+        "raw_materials": _lines_to_text(
+            _pick(parsed_obj, "raw_materials", "inputs", "cost_drivers", "rawMaterials", "핵심원재료투입요소")
+        ),
+        "profit_up_factors": _lines_to_text(
+            _pick(parsed_obj, "profit_up_factors", "upside", "profitUpFactors", "이익증가요인")
+        ),
+        "profit_down_factors": _lines_to_text(
+            _pick(parsed_obj, "profit_down_factors", "risks", "downside", "profitDownFactors", "이익감소요인")
+        ),
+        "key_takeaway": _lines_to_text(
+            _pick(parsed_obj, "key_takeaway", "takeaway", "summary", "keyTakeaway", "요약메모")
+        ),
+    }
+    if not any((analysis.get(k) or "").strip() for k in analysis.keys()):
+        return {}, "AI 응답 JSON에 분석 본문이 비어 있습니다."
     return analysis, ""
 
 
