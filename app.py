@@ -6483,6 +6483,15 @@ def estimate_dataframe_height(df: pd.DataFrame, min_height: int = 180, max_heigh
     return int(max(min_height, min(max_height, height)))
 
 
+def render_readonly_text_block(label: str, value) -> None:
+    st.caption(label)
+    text = str(value or "").strip()
+    if not text:
+        st.markdown("-")
+        return
+    st.markdown(text.replace("\n", "  \n"))
+
+
 def add_bar_labels(fig, pct: bool = False, max_labels: int = 10):
     for trace in fig.data:
         if trace.type != "bar":
@@ -8694,49 +8703,19 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
     latest = target_df.iloc[int(selected_idx)]
     financial = parse_financial_summary_json(latest.get("financial_summary_json"))
-    st.caption("선택 이력 분석 내용")
+    st.markdown("#### 선택 이력 분석 내용")
     latest_overview = latest.get("company_overview") or ""
     latest_products = latest.get("products_services") or ""
     latest_raw = latest.get("raw_materials") or ""
     latest_up = latest.get("profit_up_factors") or ""
     latest_down = latest.get("profit_down_factors") or ""
     latest_note = latest.get("note") or ""
-    st.text_area(
-        "기업 개요(저장본)",
-        value=latest_overview,
-        height=estimate_textarea_height(latest_overview, min_height=130),
-        disabled=True,
-    )
-    st.text_area(
-        "핵심 제품/서비스(저장본)",
-        value=latest_products,
-        height=estimate_textarea_height(latest_products, min_height=120),
-        disabled=True,
-    )
-    st.text_area(
-        "핵심 원재료/투입요소(저장본)",
-        value=latest_raw,
-        height=estimate_textarea_height(latest_raw, min_height=120),
-        disabled=True,
-    )
-    st.text_area(
-        "이익 증가 요인(저장본)",
-        value=latest_up,
-        height=estimate_textarea_height(latest_up, min_height=140),
-        disabled=True,
-    )
-    st.text_area(
-        "이익 감소 요인(저장본)",
-        value=latest_down,
-        height=estimate_textarea_height(latest_down, min_height=140),
-        disabled=True,
-    )
-    st.text_area(
-        "요약 메모(저장본)",
-        value=latest_note,
-        height=estimate_textarea_height(latest_note, min_height=110),
-        disabled=True,
-    )
+    render_readonly_text_block("기업 개요(저장본)", latest_overview)
+    render_readonly_text_block("핵심 제품/서비스(저장본)", latest_products)
+    render_readonly_text_block("핵심 원재료/투입요소(저장본)", latest_raw)
+    render_readonly_text_block("이익 증가 요인(저장본)", latest_up)
+    render_readonly_text_block("이익 감소 요인(저장본)", latest_down)
+    render_readonly_text_block("요약 메모(저장본)", latest_note)
 
     metric_keys = [
         ("market_cap", "시가총액"),
