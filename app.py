@@ -7458,11 +7458,22 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
     cash_total_krw = 0.0
     cash_krw = 0.0
     cash_usd = 0.0
+    krw_asset_total = 0.0
+    foreign_asset_total = 0.0
     if summary_available:
         source_df = to_krw_view(source_df, usd_krw_rate)
         base_date = selected_date
         total_value, total_pnl, total_principal, total_return = compute_totals(source_df, usd_krw_rate, base_date)
         cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(base_date, None)
+        currency_series = source_df.get(COL_CURRENCY, pd.Series(dtype=str)).astype(str).str.upper()
+        krw_mask = currency_series == "KRW"
+        krw_holding_value = float(pd.to_numeric(source_df.loc[krw_mask, COL_VALUE_KRW], errors="coerce").fillna(0).sum())
+        total_holding_value = float(pd.to_numeric(source_df[COL_VALUE_KRW], errors="coerce").fillna(0).sum())
+        foreign_holding_value = max(0.0, total_holding_value - krw_holding_value)
+        fx_for_cash = float(get_usd_krw_rate_for_date(base_date)[0]) if base_date else float(usd_krw_rate)
+        foreign_cash_value = float(cash_usd) * fx_for_cash
+        krw_asset_total = float(krw_holding_value) + float(cash_krw)
+        foreign_asset_total = float(foreign_holding_value) + float(foreign_cash_value)
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">전체 자산 요약</div>', unsafe_allow_html=True)
@@ -7471,7 +7482,11 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
     else:
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            render_summary_card("총 평가금액", format_won(total_value), f"보유 종목 {len(source_df)}개")
+            split_note = (
+                f"원화자산 {krw_asset_total:,.0f}원 / 해외자산 {foreign_asset_total:,.0f}원"
+                f"<br>보유 종목 {len(source_df)}개"
+            )
+            render_summary_card("총 평가금액", format_won(total_value), split_note)
         with c2:
             render_summary_card("총 손익", format_signed_won(total_pnl), "기준: 평가 - 원금", value_class(total_pnl))
         with c3:
