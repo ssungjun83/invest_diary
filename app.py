@@ -47,7 +47,7 @@ COL_CURRENCY = "통화"
 COL_FX_RATE = "환율(원화기준)"
 COL_VALUE_KRW = "평가금액(원화)"
 COL_PNL_KRW = "손익금액(원화)"
-COL_PRICE_KRW = "주가(원화)"
+COL_PRICE_KRW = "주가(원화환산)"
 COL_AVG_BUY_KRW = "평균매수가(원화)"
 
 DEFAULT_USD_KRW = 1350.0
@@ -7654,41 +7654,68 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
     cash_total_krw = 0.0
     cash_krw = 0.0
     cash_usd = 0.0
-    krw_asset_total = 0.0
-    foreign_asset_total = 0.0
+    total_holding_value = 0.0
+    domestic_holding_value = 0.0
+    foreign_holding_value = 0.0
+    unknown_holding_value = 0.0
+    foreign_holding_usd = 0.0
+    foreign_cash_value = 0.0
+    fx_for_cash = float(get_usd_krw_rate_for_date(selected_date)[0]) if selected_date else float(usd_krw_rate)
     if summary_available:
         source_df = to_krw_view(source_df, usd_krw_rate)
         base_date = selected_date
         total_value, total_pnl, total_principal, total_return = compute_totals(source_df, usd_krw_rate, base_date)
         cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(base_date, None)
-        currency_series = source_df.get(COL_CURRENCY, pd.Series(dtype=str)).astype(str).str.upper()
-        krw_mask = currency_series == "KRW"
-        krw_holding_value = float(pd.to_numeric(source_df.loc[krw_mask, COL_VALUE_KRW], errors="coerce").fillna(0).sum())
         total_holding_value = float(pd.to_numeric(source_df[COL_VALUE_KRW], errors="coerce").fillna(0).sum())
-        foreign_holding_value = max(0.0, total_holding_value - krw_holding_value)
-        fx_for_cash = float(get_usd_krw_rate_for_date(base_date)[0]) if base_date else float(usd_krw_rate)
+        market_view_for_summary = build_holdings_market_view(source_df, usd_krw_rate)
+        if not market_view_for_summary.empty:
+            grouped = (
+                market_view_for_summary.groupby("시장구분", as_index=False)[COL_VALUE_KRW]
+                .sum()
+                .set_index("시장구분")[COL_VALUE_KRW]
+            )
+            domestic_holding_value = float(grouped.get("국내주식", 0.0))
+            foreign_holding_value = float(grouped.get("해외주식", 0.0))
+            unknown_holding_value = float(grouped.get("미분류", 0.0))
+        else:
+            unknown_holding_value = total_holding_value
         foreign_cash_value = float(cash_usd) * fx_for_cash
-        krw_asset_total = float(krw_holding_value) + float(cash_krw)
-        foreign_asset_total = float(foreign_holding_value) + float(foreign_cash_value)
+        foreign_holding_usd = (foreign_holding_value / fx_for_cash) if fx_for_cash else 0.0
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">전체 자산 요약</div>', unsafe_allow_html=True)
     if not summary_available:
         st.info("저장된 데이터가 없습니다. 기록 입력 탭에서 먼저 스냅샷을 저장해 주세요.")
     else:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            split_note = (
-                f"원화자산 {krw_asset_total:,.0f}원 / 해외자산 {foreign_asset_total:,.0f}원"
-                f"<br>보유 종목 {len(source_df)}개"
-            )
-            render_summary_card("총 평가금액", format_won(total_value), split_note)
+            total_note = f"주식 {format_won(total_holding_value)} + 예수금 {format_won(cash_total_krw)}<br>보유 종목 {len(source_df)}개"
+            render_summary_card("총 평가금액", format_won(total_value), total_note)
         with c2:
             render_summary_card("총 손익", format_signed_won(total_pnl), "기준: 평가 - 원금", value_class(total_pnl))
         with c3:
             render_summary_card("총 수익률", format_signed_pct(total_return), f"총원금 {format_won(total_principal)}", value_class(total_return))
+
+        c4, c5, c6, c7 = st.columns(4)
         with c4:
-            render_summary_card("현재 예수금", format_won(cash_total_krw), f"원화 {cash_krw:,.0f}원 / 달러 {format_usd(cash_usd)}")
+            dom_note = "국내 종목 평가금액 합계"
+            if unknown_holding_value > 0:
+                dom_note = f"{dom_note}<br>미분류 {format_won(unknown_holding_value)}"
+            render_summary_card("국내주식 자산", format_won(domestic_holding_value), dom_note)
+        with c5:
+            render_summary_card(
+                "해외주식 자산",
+                format_won(foreign_holding_value),
+                f"원화환산 기준 / 달러환산 {format_usd(foreign_holding_usd)}",
+            )
+        with c6:
+            render_summary_card("원화 예수금", format_won(cash_krw), "KRW 현금")
+        with c7:
+            render_summary_card(
+                "달러 예수금",
+                format_usd(cash_usd),
+                f"원화환산 {format_won(foreign_cash_value)} (USD/KRW {fx_for_cash:,.0f})",
+            )
         if not exact_snapshot_exists:
             if asof_latest_date is not None:
                 st.caption(
@@ -8801,7 +8828,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 "기업명": nm,
                 "티커": ticker_map.get(nm, ""),
                 "산업섹터": sector_map.get(nm, ""),
-                "현재주가(원화)": price_map.get(nm),
+                "현재주가(원화환산)": price_map.get(nm),
                 "등록일시": registered_at_map.get(nm, ""),
                 "구분": ", ".join(tags),
                 "리스트소스": source_map.get(nm, ""),
@@ -9112,13 +9139,13 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             placeholder="기업명/티커/산업섹터/구분/소스/등록일시/주가 포함 검색",
         )
         overview_df = pd.DataFrame(overview_rows)
-        overview_df["현재주가(원화)"] = pd.to_numeric(overview_df["현재주가(원화)"], errors="coerce")
+        overview_df["현재주가(원화환산)"] = pd.to_numeric(overview_df["현재주가(원화환산)"], errors="coerce")
         overview_df["등록일시"] = pd.to_datetime(overview_df.get("등록일시"), errors="coerce")
         search_text = str(search_keyword or "").strip()
         if search_text:
             needle = search_text.casefold()
             mask = pd.Series(False, index=overview_df.index)
-            for col in ["기업명", "티커", "산업섹터", "구분", "리스트소스", "등록일시", "현재주가(원화)"]:
+            for col in ["기업명", "티커", "산업섹터", "구분", "리스트소스", "등록일시", "현재주가(원화환산)"]:
                 series_text = overview_df[col].astype(str).str.casefold()
                 mask = mask | series_text.str.contains(re.escape(needle), regex=True, na=False)
             overview_view_df = overview_df[mask].copy()
@@ -9137,7 +9164,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "현재주가(원화)": st.column_config.NumberColumn("현재주가(원화)", format="localized"),
+                    "현재주가(원화환산)": st.column_config.NumberColumn("현재주가(원화환산)", format="localized"),
                     "등록일시": st.column_config.DatetimeColumn("등록일시", format="YYYY-MM-DD HH:mm:ss"),
                 },
                 on_select="rerun",
