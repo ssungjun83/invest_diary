@@ -8751,7 +8751,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         )
     with meta_btn_col3:
         refresh_price_btn = st.button(
-            "현재 주가 일괄 불러오기 (API+AI)",
+            "현재 주가 일괄 불러오기 + DB저장 (API+AI)",
             key="analysis_fill_company_price_btn",
         )
 
