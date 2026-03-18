@@ -7478,6 +7478,8 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
         reverse=True,
     )
     if all_snapshot_dates:
+        if st.session_state.pop("dashboard_delete_snapshot_confirm_reset", False):
+            st.session_state["dashboard_delete_snapshot_confirm"] = False
         del_col1, del_col2, del_col3 = st.columns([1.2, 0.8, 1.4])
         with del_col1:
             st.selectbox(
@@ -7505,7 +7507,7 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
                     delete_cash=True,
                     sync_to_github=True,
                 )
-                st.session_state["dashboard_delete_snapshot_confirm"] = False
+                st.session_state["dashboard_delete_snapshot_confirm_reset"] = True
                 if ok:
                     st.session_state["github_sync_notice"] = msg
                     st.rerun()
