@@ -526,6 +526,41 @@ def inject_styles() -> None:
                 color: #e2e8f0 !important;
             }
 
+            /* Sidebar controls with white surface: force dark text for readability */
+            [data-testid="stSidebar"] .stTextInput input,
+            [data-testid="stSidebar"] .stDateInput input,
+            [data-testid="stSidebar"] .stNumberInput input,
+            [data-testid="stSidebar"] .stTextArea textarea,
+            [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div {
+                color: #0f172a !important;
+                background: rgba(255, 255, 255, 0.96) !important;
+            }
+
+            [data-testid="stSidebar"] input::placeholder,
+            [data-testid="stSidebar"] textarea::placeholder {
+                color: #64748b !important;
+                opacity: 1 !important;
+            }
+
+            [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+                background: #f8fafc !important;
+                border: 1px solid rgba(148, 163, 184, 0.45) !important;
+            }
+
+            [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] * {
+                color: #334155 !important;
+            }
+
+            [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {
+                color: #0f172a !important;
+                background: #ffffff !important;
+                border: 1px solid rgba(148, 163, 184, 0.55) !important;
+            }
+
+            [data-testid="stSidebar"] .stCaption {
+                color: #cbd5e1 !important;
+            }
+
             .hero {
                 background: linear-gradient(120deg, #0f172a 0%, #1d4ed8 58%, #0f766e 100%);
                 border-radius: 18px;
