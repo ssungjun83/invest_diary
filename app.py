@@ -41,6 +41,7 @@ COL_FX_RATE = "환율(원화기준)"
 COL_VALUE_KRW = "평가금액(원화)"
 COL_PNL_KRW = "손익금액(원화)"
 COL_PRICE_KRW = "주가(원화)"
+COL_AVG_BUY_KRW = "평균매수가(원화)"
 
 DEFAULT_USD_KRW = 1350.0
 
@@ -6204,13 +6205,22 @@ def style_market_detail_table(df: pd.DataFrame):
         return df
 
     view = df.copy()
-    numeric_cols = [COL_QTY, COL_PRICE_KRW, "투자금액(원)", COL_VALUE_KRW, COL_PNL_KRW, COL_RETURN, "비중(%)"]
+    numeric_cols = [
+        COL_QTY,
+        COL_AVG_BUY_KRW,
+        COL_PRICE_KRW,
+        "투자금액(원)",
+        COL_VALUE_KRW,
+        COL_PNL_KRW,
+        COL_RETURN,
+        "비중(%)",
+    ]
     for col in numeric_cols:
         if col in view.columns:
             view[col] = pd.to_numeric(view[col], errors="coerce")
 
     fmt_map = {}
-    for col in [COL_QTY, COL_PRICE_KRW, "투자금액(원)", COL_VALUE_KRW, COL_PNL_KRW]:
+    for col in [COL_QTY, COL_AVG_BUY_KRW, COL_PRICE_KRW, "투자금액(원)", COL_VALUE_KRW, COL_PNL_KRW]:
         if col in view.columns:
             fmt_map[col] = "{:,.0f}"
     if COL_RETURN in view.columns:
@@ -7103,6 +7113,10 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         st.markdown("#### 국내/해외 보유 리스트 한눈에 보기")
         market_view_df = build_holdings_market_view(cleaned_df, usd_krw_rate)
         market_view_df["투자금액(원)"] = market_view_df[COL_VALUE_KRW] - market_view_df[COL_PNL_KRW]
+        market_view_df[COL_AVG_BUY_KRW] = (
+            pd.to_numeric(market_view_df["투자금액(원)"], errors="coerce")
+            / pd.to_numeric(market_view_df[COL_QTY], errors="coerce").replace(0, pd.NA)
+        )
         market_view_df[COL_PRICE_KRW] = build_price_series_with_company_fallback(
             names=market_view_df[COL_NAME],
             qty=market_view_df[COL_QTY],
@@ -7181,6 +7195,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             "티커",
             COL_CURRENCY,
             COL_QTY,
+            COL_AVG_BUY_KRW,
             COL_PRICE_KRW,
             "투자금액(원)",
             COL_VALUE_KRW,
