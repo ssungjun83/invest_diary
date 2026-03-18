@@ -19,6 +19,27 @@ python -m streamlit run app.py
 - Company Score
 - API Settings
 
+## Daily auto snapshot (price refresh -> recalc -> save)
+
+- In `API 설정` tab, enable `하루 1회 자동 실행 사용`.
+- Logic:
+  - Uses **yesterday's** holdings + cash as baseline.
+  - Refreshes today's prices.
+  - Recalculates total asset / total PnL.
+  - Saves today's snapshot automatically.
+
+For true unattended execution, run scheduler command once per day:
+
+```bash
+python daily_auto_snapshot.py
+```
+
+Force run (ignore hour/once-per-day guard):
+
+```bash
+python daily_auto_snapshot.py --force
+```
+
 ## Security
 
 - API keys are saved in local `portfolio.db` (not committed).

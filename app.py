@@ -5969,6 +5969,28 @@ def save_app_settings(settings: dict[str, str]) -> None:
         conn.close()
 
 
+def save_app_settings_partial(settings: dict[str, str]) -> None:
+    if not settings:
+        return
+    now_str = datetime.now().isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        rows = [(str(k), str(v), now_str) for k, v in settings.items()]
+        conn.executemany(
+            """
+            INSERT INTO app_settings (setting_key, setting_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value=excluded.setting_value,
+                updated_at=excluded.updated_at
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def initialize_api_settings(force: bool = False) -> None:
     settings = load_app_settings()
     store_sensitive = _to_bool_flag(settings.get("store_sensitive_keys", "false"))
@@ -5985,6 +6007,18 @@ def initialize_api_settings(force: bool = False) -> None:
     github_branch = settings.get("github_branch", "main") or "main"
     github_excel_path = settings.get("github_excel_path", "portfolio_auto.xlsx") or "portfolio_auto.xlsx"
     github_token = settings.get("github_token", "") if store_sensitive else ""
+    daily_auto_enabled = _to_bool_flag(settings.get("daily_auto_snapshot_enabled", "false"))
+    daily_auto_use_ai_ticker = _to_bool_flag(settings.get("daily_auto_snapshot_use_ai_ticker", "true"))
+    daily_auto_hour_raw = settings.get("daily_auto_snapshot_hour", "18")
+    try:
+        daily_auto_hour = int(str(daily_auto_hour_raw).strip())
+    except Exception:
+        daily_auto_hour = 18
+    daily_auto_hour = max(0, min(23, daily_auto_hour))
+    daily_auto_last_run_date = str(settings.get("daily_auto_snapshot_last_run_date", "") or "").strip()
+    daily_auto_last_run_at = str(settings.get("daily_auto_snapshot_last_run_at", "") or "").strip()
+    daily_auto_last_attempt_date = str(settings.get("daily_auto_snapshot_last_attempt_date", "") or "").strip()
+    daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
     # Secure source priority: secrets/env > DB
     global_openai_key = _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"]) or global_openai_key
@@ -6008,6 +6042,13 @@ def initialize_api_settings(force: bool = False) -> None:
         "github_branch": github_branch,
         "github_excel_path": github_excel_path,
         "github_token": github_token,
+        "daily_auto_snapshot_enabled": daily_auto_enabled,
+        "daily_auto_snapshot_use_ai_ticker": daily_auto_use_ai_ticker,
+        "daily_auto_snapshot_hour": int(daily_auto_hour),
+        "daily_auto_snapshot_last_run_date": daily_auto_last_run_date,
+        "daily_auto_snapshot_last_run_at": daily_auto_last_run_at,
+        "daily_auto_snapshot_last_attempt_date": daily_auto_last_attempt_date,
+        "daily_auto_snapshot_last_summary": daily_auto_last_summary,
     }
     for k, v in global_map.items():
         if force or k not in st.session_state:
@@ -6118,6 +6159,185 @@ def ensure_portfolio_columns(df: pd.DataFrame, usd_krw_rate: float, force_usd_ra
         ] = float(usd_krw_rate)
     base[COL_FX_RATE] = base[COL_FX_RATE].fillna(1.0)
     return base
+
+
+def _refresh_company_prices_for_portfolio(
+    portfolio_df: pd.DataFrame,
+    target_date: date,
+    ai_provider: str,
+    ai_api_key: str,
+    ai_model: str,
+    use_ai_ticker: bool,
+) -> tuple[int, int, list[str]]:
+    if portfolio_df is None or portfolio_df.empty:
+        return 0, 0, []
+
+    market_pref_map = build_market_preference_map(portfolio_df)
+    unique_names = (
+        portfolio_df[COL_NAME]
+        .astype(str)
+        .str.strip()
+        .replace({"": pd.NA})
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+    updated_count = 0
+    resolved_ticker_count = 0
+    failures: list[str] = []
+
+    for stock_name in unique_names:
+        ticker = get_company_list_ticker(stock_name)
+        if not ticker:
+            ticker, _ = resolve_ticker_auto_with_retry(
+                stock_name,
+                use_ai=bool(use_ai_ticker and ai_api_key),
+                api_key=ai_api_key,
+                model=ai_model,
+                provider=ai_provider,
+                market_preference=market_pref_map.get(stock_name, ""),
+            )
+            ticker = clean_valid_ticker(ticker)
+            if ticker:
+                resolved_ticker_count += 1
+        if not ticker:
+            failures.append(f"{stock_name}(티커 미확보)")
+            continue
+
+        price_krw, price_src = fetch_current_price_krw_from_ticker(ticker, target_date)
+        if price_krw is None or float(price_krw) <= 0:
+            failures.append(f"{stock_name}({price_src or '주가 조회 실패'})")
+            continue
+
+        upsert_company_list_entry(
+            stock_name,
+            ticker=ticker,
+            source="daily_auto_price",
+            price_krw=float(price_krw),
+            price_source=price_src or "daily_auto_price",
+        )
+        updated_count += 1
+
+    return updated_count, resolved_ticker_count, failures
+
+
+def run_daily_auto_snapshot(force: bool = False, target_date: date | None = None) -> tuple[bool, str]:
+    run_date = target_date or date.today()
+    run_date_text = run_date.isoformat()
+    base_date = run_date - timedelta(days=1)
+    base_date_text = base_date.isoformat()
+
+    enabled = bool(st.session_state.get("daily_auto_snapshot_enabled", False))
+    if not enabled and not force:
+        return False, ""
+
+    try:
+        run_hour = int(st.session_state.get("daily_auto_snapshot_hour", 18))
+    except Exception:
+        run_hour = 18
+    run_hour = max(0, min(23, run_hour))
+
+    now_local = datetime.now()
+    last_run_date = str(st.session_state.get("daily_auto_snapshot_last_run_date", "") or "").strip()
+    last_attempt_date = str(st.session_state.get("daily_auto_snapshot_last_attempt_date", "") or "").strip()
+    if not force:
+        if run_date == date.today() and now_local.hour < run_hour:
+            return False, ""
+        if last_run_date == run_date_text:
+            return False, ""
+        if last_attempt_date == run_date_text:
+            return False, ""
+
+    st.session_state["daily_auto_snapshot_last_attempt_date"] = run_date_text
+    save_app_settings_partial({"daily_auto_snapshot_last_attempt_date": run_date_text})
+
+    try:
+        bootstrap_excel_from_github_if_needed()
+    except Exception:
+        pass
+
+    usd_krw_rate, _ = get_usd_krw_rate_for_date(run_date)
+    base_df = ensure_portfolio_columns(load_snapshot(base_date), usd_krw_rate, force_usd_rate=True)
+    if base_df.empty:
+        fail_msg = "일일 자동 저장 실패: 전일 기준 보유 자산 데이터가 없어 스냅샷을 생성하지 못했습니다."
+        st.session_state["daily_auto_snapshot_last_summary"] = fail_msg
+        save_app_settings_partial({"daily_auto_snapshot_last_summary": fail_msg})
+        return False, fail_msg
+
+    ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+    use_ai_ticker = bool(st.session_state.get("daily_auto_snapshot_use_ai_ticker", True))
+
+    try:
+        updated_price_count, resolved_ticker_count, failures = _refresh_company_prices_for_portfolio(
+            portfolio_df=base_df,
+            target_date=run_date,
+            ai_provider=ai_provider,
+            ai_api_key=ai_api_key,
+            ai_model=ai_model,
+            use_ai_ticker=use_ai_ticker,
+        )
+
+        company_list_df = load_company_list()
+        company_price_exact, company_price_norm = build_company_price_krw_maps(company_list_df)
+        final_df = recalculate_portfolio_from_price_and_avg_buy(
+            df=base_df,
+            usd_krw_rate=usd_krw_rate,
+            company_price_exact=company_price_exact,
+            company_price_norm=company_price_norm,
+        )
+        final_df = ensure_numeric(final_df, usd_krw_rate)
+
+        # 자동 실행은 전일 예수금을 그대로 승계한다.
+        base_cash_krw, base_cash_usd = load_snapshot_cash(base_date)
+        save_snapshot_cash(run_date, base_cash_krw, base_cash_usd)
+
+        sync_ok, sync_msg = save_snapshot(
+            snapshot_date=run_date,
+            df=final_df,
+            sync_to_github=True,
+            sync_reason="daily_auto",
+        )
+
+        view_krw = to_krw_view(final_df, usd_krw_rate, force_usd_rate=True)
+        stock_total_krw = float(pd.to_numeric(view_krw.get(COL_VALUE_KRW), errors="coerce").fillna(0).sum())
+        stock_pnl_krw = float(pd.to_numeric(view_krw.get(COL_PNL_KRW), errors="coerce").fillna(0).sum())
+        cash_total_krw, _, _ = get_snapshot_cash_krw(run_date, usd_krw_rate)
+        total_asset_krw = stock_total_krw + float(cash_total_krw)
+
+        sync_note = ""
+        if sync_msg:
+            sync_note = f" / GitHub {'완료' if sync_ok else '경고'}: {sync_msg}"
+        summary = (
+            f"일일 자동 저장 완료({run_date_text}) "
+            f"[기준: {base_date_text} 보유/예수금] "
+            f"- 총자산 {total_asset_krw:,.0f}원, 총손익 {stock_pnl_krw:,.0f}원, "
+            f"주가갱신 {updated_price_count}개, 티커보강 {resolved_ticker_count}개"
+            f"{sync_note}"
+        )
+        if failures:
+            preview = ", ".join(failures[:3])
+            remain = len(failures) - min(3, len(failures))
+            tail = f" 외 {remain}개" if remain > 0 else ""
+            summary += f" / 일부 실패: {preview}{tail}"
+
+        now_text = datetime.now().isoformat(timespec="seconds")
+        st.session_state["daily_auto_snapshot_last_run_date"] = run_date_text
+        st.session_state["daily_auto_snapshot_last_run_at"] = now_text
+        st.session_state["daily_auto_snapshot_last_summary"] = summary
+        save_app_settings_partial(
+            {
+                "daily_auto_snapshot_last_run_date": run_date_text,
+                "daily_auto_snapshot_last_run_at": now_text,
+                "daily_auto_snapshot_last_summary": summary,
+                "daily_auto_snapshot_last_attempt_date": run_date_text,
+            }
+        )
+        return True, summary
+    except Exception as exc:
+        fail_msg = f"일일 자동 저장 실패: {exc}"
+        st.session_state["daily_auto_snapshot_last_summary"] = fail_msg
+        save_app_settings_partial({"daily_auto_snapshot_last_summary": fail_msg})
+        return False, fail_msg
 
 
 def to_krw_view(df: pd.DataFrame, usd_krw_rate: float, force_usd_rate: bool = False) -> pd.DataFrame:
@@ -10254,6 +10474,50 @@ def render_api_settings_tab() -> None:
                 elif msg:
                     st.warning(msg)
 
+    st.markdown("#### 일일 자동 주가 갱신/자산 저장")
+    st.checkbox(
+        "하루 1회 자동 실행 사용",
+        key="daily_auto_snapshot_enabled",
+        help="기준 시각 이후 첫 실행에서 전일 보유/예수금을 기준으로 주가 갱신→재계산→오늘 스냅샷 저장을 수행합니다.",
+    )
+    st.number_input(
+        "자동 실행 기준 시각(한국시간, 시)",
+        min_value=0,
+        max_value=23,
+        step=1,
+        key="daily_auto_snapshot_hour",
+    )
+    st.checkbox(
+        "티커 비어있을 때 AI 티커 보강 사용",
+        key="daily_auto_snapshot_use_ai_ticker",
+        help="자동 실행 시 티커가 없는 종목만 AI/API 경로로 티커를 보강합니다.",
+    )
+    st.caption(
+        "자동 실행 기준: 전일(어제) 스냅샷의 보유종목/예수금을 고정으로 가져와, "
+        "당일 주가만 갱신해 총자산/총손익을 재계산 후 저장합니다."
+    )
+    st.caption(
+        "주의: Streamlit 앱은 요청이 있을 때 실행됩니다. "
+        "완전 무인 실행이 필요하면 OS 작업 스케줄러/cron으로 `daily_auto_snapshot.py`를 하루 1회 실행하세요."
+    )
+
+    last_run_date = str(st.session_state.get("daily_auto_snapshot_last_run_date", "") or "").strip()
+    last_run_at = str(st.session_state.get("daily_auto_snapshot_last_run_at", "") or "").strip()
+    last_summary = str(st.session_state.get("daily_auto_snapshot_last_summary", "") or "").strip()
+    if last_run_date:
+        st.caption(f"최근 자동 저장일: {last_run_date}" + (f" ({last_run_at})" if last_run_at else ""))
+    if last_summary:
+        st.caption(f"최근 자동 저장 결과: {last_summary}")
+
+    if st.button("일일 자동 실행 지금 테스트", key="api_daily_auto_snapshot_test_btn"):
+        ok, msg = run_daily_auto_snapshot(force=True, target_date=date.today())
+        if ok:
+            st.success(msg)
+        elif msg:
+            st.warning(msg)
+        else:
+            st.info("실행할 항목이 없습니다.")
+
     action_col1, action_col2 = st.columns([1, 1.2])
     with action_col1:
         submit_save = st.button("API 설정 저장", type="primary", key="api_save_settings_btn")
@@ -10278,6 +10542,13 @@ def render_api_settings_tab() -> None:
                 "github_branch": st.session_state.get("github_branch", "main"),
                 "github_excel_path": st.session_state.get("github_excel_path", "portfolio_auto.xlsx"),
                 "github_token": st.session_state.get("github_token", "") if persist_sensitive else "",
+                "daily_auto_snapshot_enabled": "true" if bool(st.session_state.get("daily_auto_snapshot_enabled", False)) else "false",
+                "daily_auto_snapshot_use_ai_ticker": "true" if bool(st.session_state.get("daily_auto_snapshot_use_ai_ticker", True)) else "false",
+                "daily_auto_snapshot_hour": str(int(st.session_state.get("daily_auto_snapshot_hour", 18) or 18)),
+                "daily_auto_snapshot_last_run_date": st.session_state.get("daily_auto_snapshot_last_run_date", ""),
+                "daily_auto_snapshot_last_run_at": st.session_state.get("daily_auto_snapshot_last_run_at", ""),
+                "daily_auto_snapshot_last_attempt_date": st.session_state.get("daily_auto_snapshot_last_attempt_date", ""),
+                "daily_auto_snapshot_last_summary": st.session_state.get("daily_auto_snapshot_last_summary", ""),
             }
         )
         st.session_state["api_settings_saved_notice"] = (
@@ -10384,6 +10655,12 @@ def main() -> None:
     force_reload = bool(st.session_state.pop("force_reload_api_settings", False))
     initialize_api_settings(force=force_reload)
     bootstrap_excel_from_github_if_needed()
+    auto_ok, auto_msg = run_daily_auto_snapshot(force=False, target_date=date.today())
+    if auto_msg:
+        if auto_ok:
+            st.session_state["daily_auto_snapshot_notice_success"] = auto_msg
+        else:
+            st.session_state["daily_auto_snapshot_notice_warning"] = auto_msg
 
     st.markdown(
         """
@@ -10454,6 +10731,10 @@ def main() -> None:
 
     if "portfolio_excel_notice" in st.session_state:
         st.success(st.session_state.pop("portfolio_excel_notice"))
+    if "daily_auto_snapshot_notice_success" in st.session_state:
+        st.success(st.session_state.pop("daily_auto_snapshot_notice_success"))
+    if "daily_auto_snapshot_notice_warning" in st.session_state:
+        st.warning(st.session_state.pop("daily_auto_snapshot_notice_warning"))
     if "github_sync_notice" in st.session_state:
         gh_notice = str(st.session_state.pop("github_sync_notice") or "").strip()
         if gh_notice:
