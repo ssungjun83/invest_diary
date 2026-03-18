@@ -6455,15 +6455,15 @@ def add_line_labels(fig, pct: bool = False, last_only: bool = False, max_labels:
     return fig
 
 
-def estimate_textarea_height(value, min_height: int = 100, max_height: int = 640) -> int:
+def estimate_textarea_height(value, min_height: int = 100, max_height: int = 1400) -> int:
     text = str(value or "")
     lines = text.splitlines() or [""]
     virtual_lines = 0
     for line in lines:
         line_len = len(str(line))
-        # 한 줄이 길면 실제 렌더에서 줄바꿈되므로 가상 라인을 늘려 내부 스크롤을 줄인다.
-        virtual_lines += max(1, (line_len // 42) + 1)
-    height = 42 + virtual_lines * 24
+        # 한 줄이 길면 실제 렌더에서 줄바꿈되므로 더 보수적으로(큰 높이) 계산한다.
+        virtual_lines += max(1, (line_len // 28) + 1)
+    height = 56 + virtual_lines * 28
     return int(max(min_height, min(max_height, height)))
 
 
