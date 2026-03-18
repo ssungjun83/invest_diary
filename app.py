@@ -7675,7 +7675,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     sector_map = {}
     price_map = {}
     source_map = {}
-    first_created_map = {}
+    registered_at_map = {}
     if not company_list_df.empty:
         for _, row in company_list_df.iterrows():
             nm = str(row.get("stock_name") or "").strip()
@@ -7688,7 +7688,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 price_map[nm] = float(price_val)
             source_map[nm] = str(row.get("source") or "").strip() or "manual"
             created_text = str(row.get("created_at") or "").strip()
-            first_created_map[nm] = created_text[:10] if len(created_text) >= 10 else created_text
+            registered_at_map[nm] = created_text
     overview_rows = []
     for nm in sorted(holding_set | listed_set):
         tags = []
@@ -7702,7 +7702,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 "티커": ticker_map.get(nm, ""),
                 "산업섹터": sector_map.get(nm, ""),
                 "현재주가(원화)": price_map.get(nm),
-                "최초등록일": first_created_map.get(nm, ""),
+                "등록일시": registered_at_map.get(nm, ""),
                 "구분": ", ".join(tags),
                 "리스트소스": source_map.get(nm, ""),
             }
@@ -7967,6 +7967,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.caption("목록에서 기업 행을 선택하면 아래 기업명/티커 입력이 자동 선택됩니다.")
         overview_df = pd.DataFrame(overview_rows)
         overview_df["현재주가(원화)"] = pd.to_numeric(overview_df["현재주가(원화)"], errors="coerce")
+        overview_df["등록일시"] = pd.to_datetime(overview_df.get("등록일시"), errors="coerce")
         current_input_name = (st.session_state.get("analysis_company_name_input") or "").strip()
         current_input_ticker = clean_valid_ticker(st.session_state.get("analysis_ticker_input") or "")
         selected_rows = []
@@ -7976,7 +7977,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "현재주가(원화)": st.column_config.NumberColumn("현재주가(원화)", format="localized")
+                    "현재주가(원화)": st.column_config.NumberColumn("현재주가(원화)", format="localized"),
+                    "등록일시": st.column_config.DatetimeColumn("등록일시", format="YYYY-MM-DD HH:mm:ss"),
                 },
                 on_select="rerun",
                 selection_mode="multi-row",
