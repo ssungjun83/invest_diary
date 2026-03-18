@@ -5855,15 +5855,118 @@ def _sanitize_widget_text(value, default: str = "") -> str:
 def _read_first_secret_or_env(keys: list[str]) -> str:
     for key in keys:
         value = ""
-        try:
-            value = str(st.secrets.get(key, "") or "").strip()
-        except Exception:
-            value = ""
+        key_variants = [str(key or "").strip()]
+        upper_key = key_variants[0].upper()
+        lower_key = key_variants[0].lower()
+        if upper_key and upper_key not in key_variants:
+            key_variants.append(upper_key)
+        if lower_key and lower_key not in key_variants:
+            key_variants.append(lower_key)
+        for key_variant in key_variants:
+            try:
+                value = str(st.secrets.get(key_variant, "") or "").strip()
+            except Exception:
+                value = ""
+            if value:
+                break
         if not value:
-            value = str(os.getenv(key, "") or "").strip()
+            for key_variant in key_variants:
+                value = str(os.getenv(key_variant, "") or "").strip()
+                if value:
+                    break
         if value:
             return value
     return ""
+
+
+def _normalize_github_repo_value(repo_text: str) -> str:
+    text = str(repo_text or "").strip()
+    if not text:
+        return ""
+    # URL 입력(https://github.com/owner/repo(.git))도 owner/repo로 정규화
+    m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", text, re.I)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return text
+
+
+def _load_github_settings_from_secrets() -> dict[str, str]:
+    result = {
+        "repo": "",
+        "branch": "",
+        "excel_path": "",
+        "token": "",
+        "sync_enabled": "",
+        "sync_on_change": "",
+    }
+
+    # 1) 최상위 키
+    repo = _read_first_secret_or_env(
+        ["GITHUB_REPO", "GLOBAL_GITHUB_REPO", "GITHUB_REPO_URL", "GITHUB_URL", "GITHUB_REPOSITORY"]
+    )
+    branch = _read_first_secret_or_env(["GITHUB_BRANCH", "GLOBAL_GITHUB_BRANCH"])
+    excel_path = _read_first_secret_or_env(
+        ["GITHUB_EXCEL_PATH", "GLOBAL_GITHUB_EXCEL_PATH", "GITHUB_FILE_PATH", "GITHUB_PATH"]
+    )
+    token = _read_first_secret_or_env(
+        ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT", "GITHUB_ACCESS_TOKEN", "GH_PAT"]
+    )
+    sync_enabled = _read_first_secret_or_env(["GITHUB_SYNC_ENABLED", "GLOBAL_GITHUB_SYNC_ENABLED"])
+    sync_on_change = _read_first_secret_or_env(["GITHUB_SYNC_ON_CHANGE", "GLOBAL_GITHUB_SYNC_ON_CHANGE"])
+
+    result["repo"] = _normalize_github_repo_value(repo)
+    result["branch"] = str(branch or "").strip()
+    result["excel_path"] = str(excel_path or "").strip()
+    result["token"] = str(token or "").strip()
+    result["sync_enabled"] = str(sync_enabled or "").strip()
+    result["sync_on_change"] = str(sync_on_change or "").strip()
+
+    # 2) 중첩 키 [github] / [GITHUB] 지원
+    for block_key in ["github", "GITHUB"]:
+        block = {}
+        try:
+            maybe = st.secrets.get(block_key, {})
+            if isinstance(maybe, dict):
+                block = maybe
+            else:
+                try:
+                    block = dict(maybe)
+                except Exception:
+                    block = {}
+        except Exception:
+            block = {}
+        if not block:
+            continue
+
+        def _pick(*keys: str) -> str:
+            for k in keys:
+                val = str(block.get(k, "") or "").strip()
+                if val:
+                    return val
+                up = str(k).upper()
+                low = str(k).lower()
+                val = str(block.get(up, "") or block.get(low, "") or "").strip()
+                if val:
+                    return val
+            return ""
+
+        if not result["repo"]:
+            owner = _pick("owner")
+            name = _pick("repo", "repository", "name")
+            repo_url = _pick("repo_url", "url")
+            result["repo"] = _normalize_github_repo_value(repo_url or (f"{owner}/{name}" if owner and name else name))
+        if not result["branch"]:
+            result["branch"] = _pick("branch")
+        if not result["excel_path"]:
+            result["excel_path"] = _pick("excel_path", "path", "file_path", "excel")
+        if not result["token"]:
+            result["token"] = _pick("token", "pat", "access_token", "github_token")
+        if not result["sync_enabled"]:
+            result["sync_enabled"] = _pick("sync_enabled", "enabled")
+        if not result["sync_on_change"]:
+            result["sync_on_change"] = _pick("sync_on_change", "on_change")
+
+    return result
 
 
 def get_github_sync_settings() -> dict[str, str | bool]:
@@ -6152,16 +6255,25 @@ def initialize_api_settings(force: bool = False) -> None:
     global_claude_key = _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"]) or global_claude_key
     global_alpha_key = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or global_alpha_key
     global_finnhub_key = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or global_finnhub_key
-    github_token = _read_first_secret_or_env(["GITHUB_TOKEN", "GH_TOKEN"]) or github_token
-    github_repo = _read_first_secret_or_env(["GITHUB_REPO", "GLOBAL_GITHUB_REPO"]) or github_repo
-    github_branch = _read_first_secret_or_env(["GITHUB_BRANCH", "GLOBAL_GITHUB_BRANCH"]) or github_branch
-    github_excel_path = _read_first_secret_or_env(["GITHUB_EXCEL_PATH", "GLOBAL_GITHUB_EXCEL_PATH"]) or github_excel_path
-    github_sync_enabled_secret = _read_first_secret_or_env(["GITHUB_SYNC_ENABLED", "GLOBAL_GITHUB_SYNC_ENABLED"])
+    gh_secret = _load_github_settings_from_secrets()
+    github_token = (gh_secret.get("token") or "").strip() or github_token
+    github_repo = _normalize_github_repo_value((gh_secret.get("repo") or "").strip()) or github_repo
+    github_branch = (gh_secret.get("branch") or "").strip() or github_branch
+    github_excel_path = (gh_secret.get("excel_path") or "").strip() or github_excel_path
+
+    github_sync_enabled_secret = (gh_secret.get("sync_enabled") or "").strip()
+    github_sync_on_change_secret = (gh_secret.get("sync_on_change") or "").strip()
     if github_sync_enabled_secret:
         github_sync_enabled = _to_bool_flag(github_sync_enabled_secret)
+    elif github_repo and github_excel_path and github_token:
+        # Secrets에 GitHub 핵심값이 있으면 자동 동기화를 기본 활성화한다.
+        github_sync_enabled = True
     elif not github_sync_enabled_raw:
         # 설정 DB가 비어 있는 새 환경에서는 repo/path/token이 있으면 자동으로 활성화한다.
         github_sync_enabled = bool(github_repo and github_excel_path and github_token)
+
+    if github_sync_on_change_secret:
+        github_sync_on_change = _to_bool_flag(github_sync_on_change_secret)
 
     global_map = {
         "store_sensitive_keys": store_sensitive,
@@ -6189,6 +6301,15 @@ def initialize_api_settings(force: bool = False) -> None:
     for k, v in global_map.items():
         if force or k not in st.session_state:
             st.session_state[k] = v
+
+    # GitHub 관련은 Secrets를 항상 우선 반영한다(기존 세션 값이 있어도 덮어씀).
+    if github_repo or github_excel_path or github_token or github_sync_enabled_secret or github_sync_on_change_secret:
+        st.session_state["github_repo"] = github_repo
+        st.session_state["github_branch"] = github_branch
+        st.session_state["github_excel_path"] = github_excel_path
+        st.session_state["github_token"] = github_token
+        st.session_state["github_sync_enabled"] = github_sync_enabled
+        st.session_state["github_sync_on_change"] = github_sync_on_change
 
     for prefix in ["analysis", "score", "compare"]:
         scoped_map = {
@@ -10634,6 +10755,12 @@ def render_api_settings_tab() -> None:
     st.text_input("GitHub Branch", key="github_branch", placeholder="main")
     st.text_input("GitHub Excel Path", key="github_excel_path", placeholder="portfolio_auto.xlsx")
     st.text_input("GitHub Token", key="github_token", type="password", placeholder="ghp_... (repo 권한)")
+    gh_secret_cfg = _load_github_settings_from_secrets()
+    if any(
+        str(gh_secret_cfg.get(k, "") or "").strip()
+        for k in ["repo", "branch", "excel_path", "token", "sync_enabled", "sync_on_change"]
+    ):
+        st.caption("GitHub 설정은 Streamlit Secrets/환경변수 값을 우선 사용 중입니다.")
 
     gh_col1, gh_col2 = st.columns([1, 1.2])
     with gh_col1:
