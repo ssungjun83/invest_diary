@@ -8110,7 +8110,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         current_input_name = (st.session_state.get("analysis_company_name_input") or "").strip()
         current_input_ticker = clean_valid_ticker(st.session_state.get("analysis_ticker_input") or "")
         selected_rows = []
-        overview_height = estimate_dataframe_height(overview_view_df, min_height=260, max_height=4000)
+        # 기업 리스트 표는 화면 길이 과확장을 막기 위해 고정 높이 스크롤을 사용한다.
+        overview_height = 560
         try:
             table_event = st.dataframe(
                 overview_view_df,
