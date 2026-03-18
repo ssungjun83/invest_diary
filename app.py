@@ -5259,6 +5259,54 @@ def build_price_series_with_company_fallback(
     return merged.fillna(0.0)
 
 
+def recalculate_portfolio_from_price_and_avg_buy(
+    df: pd.DataFrame,
+    usd_krw_rate: float,
+    company_price_exact: dict[str, float],
+    company_price_norm: dict[str, float],
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return ensure_portfolio_columns(pd.DataFrame(columns=COLUMNS), usd_krw_rate, force_usd_rate=True)
+
+    base = ensure_portfolio_columns(df.copy(), usd_krw_rate, force_usd_rate=True)
+    base[COL_NAME] = base[COL_NAME].astype(str).str.strip()
+    qty = pd.to_numeric(base[COL_QTY], errors="coerce")
+    fx = pd.to_numeric(base[COL_FX_RATE], errors="coerce").replace(0, pd.NA)
+
+    view = to_krw_view(base, usd_krw_rate, force_usd_rate=True)
+    current_price_krw = build_price_series_with_company_fallback(
+        names=base[COL_NAME],
+        qty=qty,
+        value_krw=view[COL_VALUE_KRW],
+        company_price_exact=company_price_exact,
+        company_price_norm=company_price_norm,
+    )
+
+    invest_krw_existing = view[COL_VALUE_KRW] - view[COL_PNL_KRW]
+    avg_buy_krw = invest_krw_existing / qty.replace(0, pd.NA)
+
+    recalc_value_krw = qty * current_price_krw
+    recalc_invest_krw = qty * avg_buy_krw
+    recalc_pnl_krw = recalc_value_krw - recalc_invest_krw
+    recalc_return = (recalc_pnl_krw / recalc_invest_krw.replace(0, pd.NA)) * 100.0
+
+    valid = (qty > 0) & (pd.to_numeric(current_price_krw, errors="coerce") > 0) & avg_buy_krw.notna() & fx.notna()
+
+    value_num = pd.to_numeric(base[COL_VALUE], errors="coerce")
+    pnl_num = pd.to_numeric(base[COL_PNL], errors="coerce")
+    ret_num = pd.to_numeric(base[COL_RETURN], errors="coerce")
+
+    recalc_value = recalc_value_krw / fx
+    recalc_pnl = recalc_pnl_krw / fx
+
+    base[COL_VALUE] = value_num.where(~valid, recalc_value)
+    base[COL_PNL] = pnl_num.where(~valid, recalc_pnl)
+    base[COL_RETURN] = ret_num.where(~valid, recalc_return)
+    base[COL_PRICE_KRW] = pd.to_numeric(current_price_krw, errors="coerce")
+    base[COL_AVG_BUY_KRW] = pd.to_numeric(avg_buy_krw, errors="coerce")
+    return base
+
+
 def upsert_company_list_entry(
     stock_name: str,
     ticker: str = "",
@@ -7109,6 +7157,12 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     )
     company_list_df = load_company_list()
     company_price_exact, company_price_norm = build_company_price_krw_maps(company_list_df)
+    cleaned_df = recalculate_portfolio_from_price_and_avg_buy(
+        cleaned_df,
+        usd_krw_rate,
+        company_price_exact=company_price_exact,
+        company_price_norm=company_price_norm,
+    )
 
     total_value, total_pnl, total_principal, total_return = compute_totals(cleaned_df, usd_krw_rate, selected_date)
     cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(selected_date, None)
@@ -7401,14 +7455,8 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     st.markdown("---")
     st.markdown("#### 수동 입력 테이블")
     prepared_df = ensure_portfolio_columns(cleaned_df, usd_krw_rate, force_usd_rate=True)
-    prepared_view = to_krw_view(prepared_df, usd_krw_rate, force_usd_rate=True)
-    prepared_df[COL_PRICE_KRW] = build_price_series_with_company_fallback(
-        names=prepared_df[COL_NAME],
-        qty=prepared_df[COL_QTY],
-        value_krw=prepared_view[COL_VALUE_KRW],
-        company_price_exact=company_price_exact,
-        company_price_norm=company_price_norm,
-    )
+    prepared_df[COL_PRICE_KRW] = pd.to_numeric(prepared_df.get(COL_PRICE_KRW), errors="coerce")
+    prepared_df[COL_AVG_BUY_KRW] = pd.to_numeric(prepared_df.get(COL_AVG_BUY_KRW), errors="coerce")
     table_df = st.data_editor(
         prepared_df,
         num_rows="dynamic",
@@ -7422,12 +7470,20 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             COL_VALUE: st.column_config.NumberColumn(COL_VALUE, min_value=0, format="localized"),
             COL_PNL: st.column_config.NumberColumn(COL_PNL, format="localized"),
             COL_RETURN: st.column_config.NumberColumn(COL_RETURN, format="localized"),
+            COL_AVG_BUY_KRW: st.column_config.NumberColumn(COL_AVG_BUY_KRW, format="localized"),
             COL_PRICE_KRW: st.column_config.NumberColumn(COL_PRICE_KRW, format="localized"),
         },
-        column_order=COLUMNS + [COL_PRICE_KRW],
-        disabled=[COL_FX_RATE, COL_PRICE_KRW],
+        column_order=COLUMNS + [COL_AVG_BUY_KRW, COL_PRICE_KRW],
+        disabled=[COL_FX_RATE, COL_AVG_BUY_KRW, COL_PRICE_KRW],
     )
-    final_df = ensure_numeric(table_df, usd_krw_rate)
+    final_df_base = ensure_numeric(table_df, usd_krw_rate)
+    final_df_calc = recalculate_portfolio_from_price_and_avg_buy(
+        final_df_base,
+        usd_krw_rate,
+        company_price_exact=company_price_exact,
+        company_price_norm=company_price_norm,
+    )
+    final_df = ensure_numeric(final_df_calc, usd_krw_rate)
 
     # GitHub 동기화가 켜진 경우, 입력 테이블 변경을 즉시 스냅샷/원격으로 반영한다.
     auto_sync_on_change = bool(st.session_state.get("github_sync_on_change", True))
