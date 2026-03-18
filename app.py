@@ -119,6 +119,30 @@ DEFAULT_TICKER_HINTS = {
     "코리아밸류업액티브": "495060.KS",
     "노브": "NOV",
     "노브(주)": "NOV",
+    "스타 벌크 캐리어스": "SBLK",
+    "스타벌크캐리어스": "SBLK",
+    "시드릴": "SDRL",
+    "오케아니스 에코 탱커스": "ECO",
+    "오케아니스에코탱커스": "ECO",
+    "센트러스 에너지": "LEU",
+    "센트러스에너지": "LEU",
+    "유나이티드헬스 그룹": "UNH",
+    "유나이티드헬스그룹": "UNH",
+    "차코스 에너지 내비게이션": "TEN",
+    "차코스에너지내비게이션": "TEN",
+    "프론트라인": "FRO",
+    "페트로브라스": "PBR",
+    "페트로브라스(ADR)": "PBR",
+    "타이드워터": "TDW",
+    "텍사스 퍼시픽 랜드": "TPL",
+    "텍사스퍼시픽랜드": "TPL",
+    "피바디 에너지": "BTU",
+    "피바디에너지": "BTU",
+    "발레로 에너지": "VLO",
+    "발레로에너지": "VLO",
+    "터치 브로스": "BROS",
+    "터치브로스": "BROS",
+    "AGNC 인베스트먼트": "AGNC",
 }
 
 AI_PROVIDER_OPTIONS = ["OpenAI", "Claude"]
@@ -244,11 +268,38 @@ def _company_name_has_hangul(name: str) -> bool:
     return bool(re.search(r"[가-힣\u1100-\u11FF\u3130-\u318F]", text))
 
 
+def _looks_foreign_hangul_name_hint(name: str) -> bool:
+    text = str(name or "").strip().upper()
+    if not text:
+        return False
+    # 한글 표기로 자주 입력되는 해외 기업명/키워드 힌트
+    foreign_tokens = [
+        "스타 벌크",
+        "스타벌크",
+        "시드릴",
+        "오케아니스",
+        "센트러스",
+        "유나이티드헬스",
+        "차코스",
+        "페트로브라스",
+        "프론트라인",
+        "타이드워터",
+        "텍사스 퍼시픽",
+        "피바디",
+        "발레로",
+        "터치 브로스",
+        "AGNC",
+    ]
+    return any(tok in text for tok in foreign_tokens)
+
+
 def _looks_explicit_foreign_company_name(name: str) -> bool:
     text = str(name or "").strip()
     if not text:
         return False
     upper = text.upper()
+    if _looks_foreign_hangul_name_hint(text):
+        return True
     if "ADR" in upper:
         return True
     domestic_tokens = ["코스피", "코스닥", "KOSPI", "KOSDAQ", "KRX", "스팩"]
@@ -310,6 +361,8 @@ def _is_non_kr_ticker_plausible_for_name(company_name: str, ticker: str) -> bool
     if base and re.search(rf"(?<![A-Z0-9]){re.escape(base)}(?![A-Z0-9])", upper):
         return True
     if "ADR" in upper:
+        return True
+    if _looks_foreign_hangul_name_hint(name):
         return True
     if _looks_explicit_foreign_company_name(name):
         return True
@@ -3167,9 +3220,15 @@ def resolve_ticker_auto_with_retry(
         if retry_kr.endswith(".KS") or retry_kr.endswith(".KQ"):
             return retry_kr, f"{retry_kr_source} (국내 우선 재시도)"
 
-    # 해외 우선이 명확할 때만 1회 재시도한다.
+    # 해외 우선이 명확하거나, 한글명이어도 국내 힌트가 없는 경우 해외 재시도를 허용한다.
+    has_domestic_hint = _looks_domestic_company_name_hint(name)
     need_retry_foreign = (pref == "foreign" and (not ticker or is_kr)) or (
-        (not ticker) and (not has_hangul_name or foreign_name_hint)
+        (not ticker)
+        and (
+            (not has_hangul_name)
+            or foreign_name_hint
+            or (has_hangul_name and not has_domestic_hint)
+        )
     )
     if need_retry_foreign:
         retry_ticker, retry_source = resolve_ticker_auto(
@@ -6476,6 +6535,8 @@ def infer_market_preference_from_row(stock_name: str, currency: str = "", ticker
     if curr and curr in {"USD", "EUR", "JPY", "CNY", "GBP", "AUD", "CAD", "CHF"}:
         return "foreign"
     if "ADR" in upper_name:
+        return "foreign"
+    if _looks_foreign_hangul_name_hint(name):
         return "foreign"
     if _company_name_has_hangul(name):
         if _looks_explicit_foreign_company_name(name):
