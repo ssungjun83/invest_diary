@@ -6738,6 +6738,60 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
 
     featured_hist = pd.DataFrame()
 
+    latest_date, latest_df = load_latest_snapshot()
+    source_df = current_df if not current_df.empty else latest_df
+    summary_available = not source_df.empty
+
+    total_value = 0.0
+    total_pnl = 0.0
+    total_principal = 0.0
+    total_return = 0.0
+    cash_total_krw = 0.0
+    cash_krw = 0.0
+    cash_usd = 0.0
+    effective_saved_date = None
+    top_stock_name = "-"
+    top_stock_weight = 0.0
+
+    if summary_available:
+        source_df = to_krw_view(source_df, usd_krw_rate)
+        base_date = selected_date
+        effective_saved_date = get_latest_snapshot_date_on_or_before(selected_date)
+        total_value, total_pnl, total_principal, total_return = compute_totals(source_df, usd_krw_rate, base_date)
+        cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(base_date, None)
+        if total_value > 0:
+            top_row = source_df.loc[source_df[COL_VALUE_KRW].idxmax()]
+            top_stock_name = str(top_row[COL_NAME])
+            top_stock_weight = float(top_row[COL_VALUE_KRW]) / total_value * 100
+
+    st.markdown('<div class="section-shell">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">전체 자산 요약</div>', unsafe_allow_html=True)
+    if not summary_available:
+        st.info("저장된 데이터가 없습니다. 기록 입력 탭에서 먼저 스냅샷을 저장해 주세요.")
+    else:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            render_summary_card("총 평가금액", format_won(total_value), f"보유 종목 {len(source_df)}개")
+        with c2:
+            render_summary_card("총 손익", format_signed_won(total_pnl), "기준: 평가 - 원금", value_class(total_pnl))
+        with c3:
+            render_summary_card("총 수익률", format_signed_pct(total_return), f"총원금 {format_won(total_principal)}", value_class(total_return))
+        with c4:
+            render_summary_card("현재 예수금", format_won(cash_total_krw), f"원화 {cash_krw:,.0f}원 / 달러 {format_usd(cash_usd)}")
+        with c5:
+            if effective_saved_date:
+                saved_text = effective_saved_date.isoformat()
+                if effective_saved_date < selected_date:
+                    recent_note = f"최근 저장: {saved_text} (미입력일 승계)"
+                else:
+                    recent_note = f"최근 저장: {saved_text}"
+            elif latest_date:
+                recent_note = f"최근 저장: {latest_date}"
+            else:
+                recent_note = "엑셀 기준 (DB 미저장)"
+            render_summary_card("비중 최대 종목", top_stock_name, f"비중 {top_stock_weight:,.0f}% | {recent_note}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">총 자산 추이 (평가금액/원금)</div>', unsafe_allow_html=True)
     if hist_df.empty:
@@ -6799,140 +6853,99 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             st.caption("오늘 스냅샷이 없어 최근 저장 자산값을 오늘 날짜로 동일 반영했습니다.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown('<div class="section-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">전체 자산 요약</div>', unsafe_allow_html=True)
+    if summary_available:
+        st.markdown('<div class="section-shell">', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">자산 구성 분석</div>', unsafe_allow_html=True)
 
-    latest_date, latest_df = load_latest_snapshot()
-    source_df = current_df if not current_df.empty else latest_df
+        dist_df = source_df.sort_values(COL_VALUE_KRW, ascending=False).copy()
+        dist_df["비중(%)"] = (dist_df[COL_VALUE_KRW] / total_value * 100).round(2) if total_value else 0
+        pnl_color_cfg = get_pnl_color_config(dist_df[COL_PNL_KRW])
+        pnl_cont_kwargs = {"color_continuous_scale": pnl_color_cfg["scale"]}
+        if pnl_color_cfg["midpoint"] is not None:
+            pnl_cont_kwargs["color_continuous_midpoint"] = pnl_color_cfg["midpoint"]
 
-    if source_df.empty:
-        st.info("저장된 데이터가 없습니다. 기록 입력 탭에서 먼저 스냅샷을 저장해 주세요.")
+        row1_col1, row1_col2 = st.columns([1, 1])
+        with row1_col1:
+            pie_df = compact_pie_df(dist_df, COL_NAME, COL_VALUE_KRW, top_n=10)
+            pie_df["비중(%)"] = (pie_df[COL_VALUE_KRW] / pie_df[COL_VALUE_KRW].sum() * 100).round(2)
+            pie_df["라벨"] = pie_df["비중(%)"].apply(lambda x: f"{x:,.0f}%" if x >= 3 else "")
+            pie_fig = px.pie(
+                pie_df,
+                names=COL_NAME,
+                values=COL_VALUE_KRW,
+                title="현재 자산 비중",
+                hole=0.50,
+                color_discrete_sequence=px.colors.qualitative.Safe,
+                custom_data=["라벨"],
+            )
+            pie_fig.update_traces(
+                texttemplate="%{customdata[0]}",
+                textposition="inside",
+                insidetextorientation="horizontal",
+                hovertemplate="%{label}<br>%{value:,.0f}원<br>%{percent:.1%}<extra></extra>",
+            )
+            pie_fig.update_layout(
+                margin=dict(l=10, r=10, t=56, b=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Noto Sans KR", color="#0f172a"),
+            )
+            st.plotly_chart(pie_fig, use_container_width=True)
+
+        with row1_col2:
+            top_bar_fig = px.bar(
+                dist_df.head(12),
+                x=COL_VALUE_KRW,
+                y=COL_NAME,
+                color=COL_PNL_KRW,
+                orientation="h",
+                title="종목별 평가금액 (Top 12)",
+                labels={COL_VALUE_KRW: "평가금액(원)", COL_NAME: "종목명", COL_PNL_KRW: "손익금액(원)"},
+                **pnl_cont_kwargs,
+            )
+            top_bar_fig.update_coloraxes(showscale=False)
+            top_bar_fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            add_bar_labels(top_bar_fig, pct=False)
+            st.plotly_chart(style_figure(top_bar_fig), use_container_width=True)
+
+        row2_col1, row2_col2 = st.columns([1, 1.1])
+        with row2_col1:
+            tree_fig = px.treemap(
+                dist_df,
+                path=[COL_NAME],
+                values=COL_VALUE_KRW,
+                color=COL_PNL_KRW,
+                title="자산 트리맵",
+                **pnl_cont_kwargs,
+            )
+            tree_fig.update_traces(textinfo="label+value+percent root")
+            tree_fig.update_coloraxes(showscale=False)
+            tree_fig.update_layout(
+                margin=dict(l=6, r=6, t=48, b=8),
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Noto Sans KR", color="#0f172a"),
+            )
+            st.plotly_chart(tree_fig, use_container_width=True)
+
+        with row2_col2:
+            risk_fig = px.scatter(
+                dist_df,
+                x=COL_RETURN,
+                y="비중(%)",
+                size=COL_VALUE_KRW,
+                color=COL_PNL_KRW,
+                hover_name=COL_NAME,
+                text=make_top_scatter_text(dist_df, COL_NAME, COL_VALUE_KRW, top_n=7),
+                title="수익률-비중 버블맵",
+                labels={COL_RETURN: "수익률(%)", "비중(%)": "포트폴리오 비중(%)", COL_PNL_KRW: "손익금액(원)"},
+                **pnl_cont_kwargs,
+            )
+            risk_fig.update_coloraxes(showscale=False)
+            risk_fig.add_hline(y=dist_df["비중(%)"].mean(), line_dash="dot", line_color="#334155")
+            risk_fig.add_vline(x=0, line_dash="dot", line_color="#334155")
+            risk_fig.update_traces(textposition="top center")
+            st.plotly_chart(style_figure(risk_fig), use_container_width=True)
+
         st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    source_df = to_krw_view(source_df, usd_krw_rate)
-    base_date = selected_date
-    effective_saved_date = get_latest_snapshot_date_on_or_before(selected_date)
-    total_value, total_pnl, total_principal, total_return = compute_totals(source_df, usd_krw_rate, base_date)
-    cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(base_date, None)
-    top_stock_name = "-"
-    top_stock_weight = 0.0
-    if total_value > 0:
-        top_row = source_df.loc[source_df[COL_VALUE_KRW].idxmax()]
-        top_stock_name = str(top_row[COL_NAME])
-        top_stock_weight = float(top_row[COL_VALUE_KRW]) / total_value * 100
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        render_summary_card("총 평가금액", format_won(total_value), f"보유 종목 {len(source_df)}개")
-    with c2:
-        render_summary_card("총 손익", format_signed_won(total_pnl), "기준: 평가 - 원금", value_class(total_pnl))
-    with c3:
-        render_summary_card("총 수익률", format_signed_pct(total_return), f"총원금 {format_won(total_principal)}", value_class(total_return))
-    with c4:
-        render_summary_card("현재 예수금", format_won(cash_total_krw), f"원화 {cash_krw:,.0f}원 / 달러 {format_usd(cash_usd)}")
-    with c5:
-        if effective_saved_date:
-            saved_text = effective_saved_date.isoformat()
-            if effective_saved_date < selected_date:
-                recent_note = f"최근 저장: {saved_text} (미입력일 승계)"
-            else:
-                recent_note = f"최근 저장: {saved_text}"
-        elif latest_date:
-            recent_note = f"최근 저장: {latest_date}"
-        else:
-            recent_note = "엑셀 기준 (DB 미저장)"
-        render_summary_card("비중 최대 종목", top_stock_name, f"비중 {top_stock_weight:,.0f}% | {recent_note}")
-
-    dist_df = source_df.sort_values(COL_VALUE_KRW, ascending=False).copy()
-    dist_df["비중(%)"] = (dist_df[COL_VALUE_KRW] / total_value * 100).round(2) if total_value else 0
-    pnl_color_cfg = get_pnl_color_config(dist_df[COL_PNL_KRW])
-    pnl_cont_kwargs = {"color_continuous_scale": pnl_color_cfg["scale"]}
-    if pnl_color_cfg["midpoint"] is not None:
-        pnl_cont_kwargs["color_continuous_midpoint"] = pnl_color_cfg["midpoint"]
-
-    row1_col1, row1_col2 = st.columns([1, 1])
-    with row1_col1:
-        pie_df = compact_pie_df(dist_df, COL_NAME, COL_VALUE_KRW, top_n=10)
-        pie_df["비중(%)"] = (pie_df[COL_VALUE_KRW] / pie_df[COL_VALUE_KRW].sum() * 100).round(2)
-        pie_df["라벨"] = pie_df["비중(%)"].apply(lambda x: f"{x:,.0f}%" if x >= 3 else "")
-        pie_fig = px.pie(
-            pie_df,
-            names=COL_NAME,
-            values=COL_VALUE_KRW,
-            title="현재 자산 비중",
-            hole=0.50,
-            color_discrete_sequence=px.colors.qualitative.Safe,
-            custom_data=["라벨"],
-        )
-        pie_fig.update_traces(
-            texttemplate="%{customdata[0]}",
-            textposition="inside",
-            insidetextorientation="horizontal",
-            hovertemplate="%{label}<br>%{value:,.0f}원<br>%{percent:.1%}<extra></extra>",
-        )
-        pie_fig.update_layout(
-            margin=dict(l=10, r=10, t=56, b=10),
-            paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Noto Sans KR", color="#0f172a"),
-        )
-        st.plotly_chart(pie_fig, use_container_width=True)
-
-    with row1_col2:
-        top_bar_fig = px.bar(
-            dist_df.head(12),
-            x=COL_VALUE_KRW,
-            y=COL_NAME,
-            color=COL_PNL_KRW,
-            orientation="h",
-            title="종목별 평가금액 (Top 12)",
-            labels={COL_VALUE_KRW: "평가금액(원)", COL_NAME: "종목명", COL_PNL_KRW: "손익금액(원)"},
-            **pnl_cont_kwargs,
-        )
-        top_bar_fig.update_coloraxes(showscale=False)
-        top_bar_fig.update_layout(yaxis={"categoryorder": "total ascending"})
-        add_bar_labels(top_bar_fig, pct=False)
-        st.plotly_chart(style_figure(top_bar_fig), use_container_width=True)
-
-    row2_col1, row2_col2 = st.columns([1, 1.1])
-    with row2_col1:
-        tree_fig = px.treemap(
-            dist_df,
-            path=[COL_NAME],
-            values=COL_VALUE_KRW,
-            color=COL_PNL_KRW,
-            title="자산 트리맵",
-            **pnl_cont_kwargs,
-        )
-        tree_fig.update_traces(textinfo="label+value+percent root")
-        tree_fig.update_coloraxes(showscale=False)
-        tree_fig.update_layout(
-            margin=dict(l=6, r=6, t=48, b=8),
-            paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Noto Sans KR", color="#0f172a"),
-        )
-        st.plotly_chart(tree_fig, use_container_width=True)
-
-    with row2_col2:
-        risk_fig = px.scatter(
-            dist_df,
-            x=COL_RETURN,
-            y="비중(%)",
-            size=COL_VALUE_KRW,
-            color=COL_PNL_KRW,
-            hover_name=COL_NAME,
-            text=make_top_scatter_text(dist_df, COL_NAME, COL_VALUE_KRW, top_n=7),
-            title="수익률-비중 버블맵",
-            labels={COL_RETURN: "수익률(%)", "비중(%)": "포트폴리오 비중(%)", COL_PNL_KRW: "손익금액(원)"},
-            **pnl_cont_kwargs,
-        )
-        risk_fig.update_coloraxes(showscale=False)
-        risk_fig.add_hline(y=dist_df["비중(%)"].mean(), line_dash="dot", line_color="#334155")
-        risk_fig.add_vline(x=0, line_dash="dot", line_color="#334155")
-        risk_fig.update_traces(textposition="top center")
-        st.plotly_chart(style_figure(risk_fig), use_container_width=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">시기별 자산 흐름</div>', unsafe_allow_html=True)
