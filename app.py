@@ -7965,15 +7965,31 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
     if overview_rows:
         st.caption("목록에서 기업 행을 선택하면 아래 기업명/티커 입력이 자동 선택됩니다.")
+        search_keyword = st.text_input(
+            "기업 종합검색",
+            key="analysis_overview_search_keyword",
+            placeholder="기업명/티커/산업섹터/구분/소스/등록일시/주가 포함 검색",
+        )
         overview_df = pd.DataFrame(overview_rows)
         overview_df["현재주가(원화)"] = pd.to_numeric(overview_df["현재주가(원화)"], errors="coerce")
         overview_df["등록일시"] = pd.to_datetime(overview_df.get("등록일시"), errors="coerce")
+        search_text = str(search_keyword or "").strip()
+        if search_text:
+            needle = search_text.casefold()
+            mask = pd.Series(False, index=overview_df.index)
+            for col in ["기업명", "티커", "산업섹터", "구분", "리스트소스", "등록일시", "현재주가(원화)"]:
+                series_text = overview_df[col].astype(str).str.casefold()
+                mask = mask | series_text.str.contains(re.escape(needle), regex=True, na=False)
+            overview_view_df = overview_df[mask].copy()
+            st.caption(f"검색 결과: {len(overview_view_df):,} / 전체 {len(overview_df):,}")
+        else:
+            overview_view_df = overview_df.copy()
         current_input_name = (st.session_state.get("analysis_company_name_input") or "").strip()
         current_input_ticker = clean_valid_ticker(st.session_state.get("analysis_ticker_input") or "")
         selected_rows = []
         try:
             table_event = st.dataframe(
-                overview_df,
+                overview_view_df,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -7998,8 +8014,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     row_idx = int(idx)
                 except Exception:
                     continue
-                if 0 <= row_idx < len(overview_df):
-                    nm = str(overview_df.iloc[row_idx].get("기업명") or "").strip()
+                if 0 <= row_idx < len(overview_view_df):
+                    nm = str(overview_view_df.iloc[row_idx].get("기업명") or "").strip()
                     if nm:
                         selected_names.append(nm)
         selected_names = list(dict.fromkeys(selected_names))
@@ -8060,9 +8076,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                         row_idx = int(idx)
                     except Exception:
                         continue
-                    if not (0 <= row_idx < len(overview_df)):
+                    if not (0 <= row_idx < len(overview_view_df)):
                         continue
-                    row_view = overview_df.iloc[row_idx]
+                    row_view = overview_view_df.iloc[row_idx]
                     company_name = str(row_view.get("기업명") or "").strip()
                     ticker = clean_valid_ticker(str(row_view.get("티커") or ""))
                     sector = str(row_view.get("산업섹터") or "").strip()
@@ -8092,10 +8108,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
         if selected_rows:
             row_idx = int(selected_rows[0])
-            if 0 <= row_idx < len(overview_df):
-                picked_name = str(overview_df.iloc[row_idx].get("기업명") or "").strip()
-                picked_ticker = clean_valid_ticker(str(overview_df.iloc[row_idx].get("티커") or ""))
-                picked_sector = str(overview_df.iloc[row_idx].get("산업섹터") or "").strip()
+            if 0 <= row_idx < len(overview_view_df):
+                picked_name = str(overview_view_df.iloc[row_idx].get("기업명") or "").strip()
+                picked_ticker = clean_valid_ticker(str(overview_view_df.iloc[row_idx].get("티커") or ""))
+                picked_sector = str(overview_view_df.iloc[row_idx].get("산업섹터") or "").strip()
                 prev_selected_name = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_company"), "")
                 if picked_name and picked_name != prev_selected_name:
                     st.session_state["analysis_selected_overview_company"] = picked_name
