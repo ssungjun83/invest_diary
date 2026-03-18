@@ -8640,9 +8640,14 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     )
 
     target_name = (st.session_state.get("analysis_company_name") or "").strip()
-    target_df = analysis_all[analysis_all["stock_name"] == target_name] if target_name else analysis_all
-    if target_df.empty:
-        target_df = analysis_all
+    if target_name:
+        target_df = analysis_all[analysis_all["stock_name"] == target_name].copy()
+        if target_df.empty:
+            st.info(f"'{target_name}' 기업의 저장된 분석 이력이 없습니다.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+    else:
+        target_df = analysis_all.copy()
 
     target_df = target_df.sort_values(["analysis_date", "updated_at"], ascending=[False, False]).copy()
     target_df["analysis_date"] = pd.to_datetime(target_df["analysis_date"])
