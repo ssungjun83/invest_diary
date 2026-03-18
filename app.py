@@ -4913,12 +4913,22 @@ def generate_company_analysis_with_ai(
 
 위 정보를 바탕으로 장기투자 관점의 기업 분석을 한국어로 작성해 주세요.
 반드시 JSON 객체만 출력하세요. 키는 아래와 같습니다.
-- company_overview: string (3~5문장)
-- products_services: array[string] (핵심 제품/서비스 4~8개)
-- raw_materials: array[string] (핵심 원재료/투입요소 4~8개)
-- profit_up_factors: array[string] (이익 증가 요인 5~10개)
-- profit_down_factors: array[string] (이익 감소/리스크 요인 5~10개)
-- key_takeaway: string (요약 2~4문장)
+- company_overview: string (4~7문장)
+- products_services: array[string] (돈 버는 방식/매출원/핵심 제품·서비스 5~10개)
+- raw_materials: array[string] (원가·투입요소·마진 민감도 5~10개)
+- profit_up_factors: array[string] (이익 증가 조건 + 좋은 변화/촉매 6~12개)
+- profit_down_factors: array[string] (이익 감소 조건 + 핵심 리스크 6~12개)
+- key_takeaway: string (핵심 결론 + 체크포인트 3~6문장)
+
+반드시 포함할 내용:
+1) 회사가 정확히 무엇을 하는지(사업모델/고객/주요 지역)
+2) 어떤 구조로 돈을 버는지(매출원/운임·가격·볼륨·스프레드 등)
+3) 어떤 상황에서 이익이 늘고/줄어드는지
+4) 기업에 유리한 변화(촉매)와 불리한 리스크
+
+주의:
+- 추정 표현은 명시(예: 추정/가정)
+- 일반론 대신 해당 기업 특성을 우선
 """
     system_prompt = "너는 재무 데이터 기반 기업분석 어시스턴트다. 반드시 JSON만 출력한다."
     text, err = call_ai_text(
@@ -4986,7 +4996,8 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
     debt_text = _fmt_num_brief(summary.get("debt_to_equity"))
 
     base_overview = [
-        f"{name}({tkr or '티커 미확정'})는 {sector} 섹터 기업입니다."
+        f"{name}({tkr or '티커 미확정'})는 {sector} 섹터에서 사업을 운영하는 기업입니다.",
+        "핵심은 어떤 상품/서비스를 누구에게 판매하는지와 해당 시장의 수급 구조입니다.",
     ]
     if country:
         base_overview.append(f"주요 상장/사업 국가는 {country}입니다.")
@@ -4997,34 +5008,45 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
         base_overview.append("세부 사업설명은 추가 공시/IR 자료 확인이 필요합니다.")
 
     products = [
-        f"{sector} 중심의 핵심 제품/서비스 포트폴리오",
-        "기존 주력 제품의 점유율 유지 전략",
-        "신규 시장 확장을 위한 제품 다각화",
-        "가격/원가/환율 변화에 대응하는 운영 전략",
+        f"주요 매출원: {sector} 관련 제품/서비스 판매",
+        "돈 버는 구조: 판매량(물동량) × 단가(가격/운임) × 마진",
+        "수익성 레버: 고정비 레버리지, 가동률, 단위당 원가",
+        "고객/시장 구조: 주요 고객군·계약 방식·지역 노출 점검",
+        "실적 확인 포인트: 매출 성장률, 영업이익률, 현금흐름의 동행 여부",
     ]
     raw_materials = [
-        "원재료/부품 조달 단가",
-        "인건비 및 운영비",
-        "물류비/운송비",
-        "환율 및 금리 조건",
+        "원재료/부품 조달 단가 및 가격 전가 가능성",
+        "인건비·에너지비·운영비 고정비 부담",
+        "물류/운송비와 공급망 병목",
+        "환율·금리·차입비용 변동",
+        "규제·환경비용·유지보수(CAPEX) 부담",
     ]
     up_factors = [
-        f"매출 성장률 개선 시 긍정 효과 ({rev_growth_text})",
-        f"수익성 지표 개선 여지 (ROE {roe_text})",
-        "주력 사업 수요 회복 또는 점유율 확대",
-        "원가 안정화 및 운영 효율화",
-        "신규 고객/시장 확장",
+        f"매출 성장률 개선 시 이익 증가 가능 ({rev_growth_text})",
+        f"수익성 지표 개선 여지 확대 (ROE {roe_text})",
+        "수요 회복/가격(운임) 상승/스프레드 확대",
+        "원가 하락 또는 가격 전가 성공",
+        "가동률 상승 및 고정비 레버리지 효과",
+        "신규 고객·시장 진입, 제품 믹스 고도화",
+        "비핵심 자산 정리·재무구조 개선",
+        "주주환원 확대/정책 수혜 등 긍정 촉매",
     ]
     down_factors = [
         f"밸류에이션 부담 가능성 (PER {pe_text}, PBR {pb_text})",
         f"재무 레버리지 부담 (부채비율/유사 지표 {debt_text})",
-        "경기 둔화에 따른 수요 감소",
-        "원자재/환율 변동성 확대",
-        "규제/정책 변화 리스크",
+        "수요 둔화·가격(운임) 하락·스프레드 축소",
+        "원자재/환율/금리 변동성 확대",
+        "가동률 하락 및 고정비 부담 심화",
+        "공급과잉·경쟁 심화·점유율 하락",
+        "규제/정책/환경 리스크",
+        "대규모 CAPEX 집행 실패 또는 현금흐름 악화",
     ]
     takeaway = [
-        f"{name}는 {sector} 내에서 실적과 밸류에이션의 균형 점검이 필요한 기업입니다.",
-        "정량 지표 확인 후 분기 실적과 가이던스 변화 중심으로 추적하는 접근이 유효합니다.",
+        f"{name}는 {sector} 업황과 가격/비용 사이클에 실적 민감도가 큰 편입니다.",
+        "이익은 수요·단가·원가·가동률 조합에서 결정되므로 분기별 지표를 함께 추적해야 합니다.",
+        "좋은 변화(촉매): 수요 회복, 가격 전가, 원가 안정, 재무구조 개선, 정책 수혜.",
+        "핵심 리스크: 수요 둔화, 가격 하락, 비용 상승, 레버리지 부담, 규제 변화.",
+        "체크포인트: 매출/마진/현금흐름/가이던스의 동행 여부.",
     ]
 
     return {
@@ -6547,13 +6569,13 @@ def estimate_dataframe_height(df: pd.DataFrame, min_height: int = 180, max_heigh
     return int(max(min_height, min(max_height, height)))
 
 
-def render_readonly_text_block(label: str, value) -> None:
-    st.caption(label)
-    text = str(value or "").strip()
-    if not text:
-        st.markdown("-")
-        return
-    st.markdown(text.replace("\n", "  \n"))
+def apply_analysis_history_to_editor(latest_row: pd.Series) -> None:
+    st.session_state["analysis_company_overview"] = str(latest_row.get("company_overview") or "")
+    st.session_state["analysis_products_services"] = str(latest_row.get("products_services") or "")
+    st.session_state["analysis_raw_materials"] = str(latest_row.get("raw_materials") or "")
+    st.session_state["analysis_profit_up_factors"] = str(latest_row.get("profit_up_factors") or "")
+    st.session_state["analysis_profit_down_factors"] = str(latest_row.get("profit_down_factors") or "")
+    st.session_state["analysis_key_takeaway"] = str(latest_row.get("note") or latest_row.get("key_takeaway") or "")
 
 
 def add_bar_labels(fig, pct: bool = False, max_labels: int = 10):
@@ -8617,7 +8639,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         height=estimate_textarea_height(st.session_state.get("analysis_company_overview", ""), min_height=130),
     )
     st.text_area(
-        "핵심 제품/서비스",
+        "핵심 제품/서비스·돈 버는 방식",
         key="analysis_products_services",
         height=estimate_textarea_height(st.session_state.get("analysis_products_services", ""), min_height=120),
     )
@@ -8627,7 +8649,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         height=estimate_textarea_height(st.session_state.get("analysis_raw_materials", ""), min_height=120),
     )
     st.text_area(
-        "이익 증가 요인",
+        "이익 증가 요인·좋은 변화(촉매)",
         key="analysis_profit_up_factors",
         height=estimate_textarea_height(st.session_state.get("analysis_profit_up_factors", ""), min_height=140),
     )
@@ -8755,19 +8777,19 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
     latest = target_df.iloc[int(selected_idx)]
     financial = parse_financial_summary_json(latest.get("financial_summary_json"))
-    st.markdown("#### 선택 이력 분석 내용")
-    latest_overview = latest.get("company_overview") or ""
-    latest_products = latest.get("products_services") or ""
-    latest_raw = latest.get("raw_materials") or ""
-    latest_up = latest.get("profit_up_factors") or ""
-    latest_down = latest.get("profit_down_factors") or ""
-    latest_note = latest.get("note") or ""
-    render_readonly_text_block("기업 개요(저장본)", latest_overview)
-    render_readonly_text_block("핵심 제품/서비스(저장본)", latest_products)
-    render_readonly_text_block("핵심 원재료/투입요소(저장본)", latest_raw)
-    render_readonly_text_block("이익 증가 요인(저장본)", latest_up)
-    render_readonly_text_block("이익 감소 요인(저장본)", latest_down)
-    render_readonly_text_block("요약 메모(저장본)", latest_note)
+    hist_info_col1, hist_info_col2 = st.columns([1.4, 1])
+    with hist_info_col1:
+        st.caption(
+            "선택 이력: "
+            f"{pd.to_datetime(latest.get('analysis_date')).date().isoformat()} | "
+            f"{str(latest.get('source') or '-')} | "
+            f"{str(latest.get('ticker') or '-')}"
+        )
+    with hist_info_col2:
+        if st.button("선택 이력 내용을 상단 분석 내용에 불러오기", key=f"analysis_apply_history_btn_{target_name or 'all'}"):
+            apply_analysis_history_to_editor(latest)
+            st.success("선택한 이력 내용을 상단 '기업 분석 내용'에 반영했습니다.")
+            st.rerun()
 
     metric_keys = [
         ("market_cap", "시가총액"),
