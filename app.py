@@ -3514,6 +3514,14 @@ def extract_cash_from_ai_payload(parsed_payload: dict) -> tuple[float | None, fl
 
 
 def build_holdings_df_from_ai_rows(rows: list[dict], usd_krw_rate: float) -> pd.DataFrame:
+    def _pick_num(item: dict, keys: list[str]) -> float | None:
+        for k in keys:
+            if k in item:
+                v = _safe_to_float(item.get(k))
+                if v is not None:
+                    return float(v)
+        return None
+
     normalized_rows = []
     for item in rows or []:
         if not isinstance(item, dict):
@@ -3524,15 +3532,28 @@ def build_holdings_df_from_ai_rows(rows: list[dict], usd_krw_rate: float) -> pd.
         if _classify_cash_bucket(stock_name, str(item.get("currency") or "")):
             continue
 
-        quantity = _safe_to_float(item.get("quantity"))
-        market_value = _safe_to_float(item.get("market_value"))
-        pnl_value = _safe_to_float(item.get("pnl_value"))
-        return_pct = _safe_to_float(item.get("return_pct"))
+        quantity = _pick_num(item, ["quantity", "qty", "shares", "보유수량", "수량", "보유주수", "주수"])
+        market_value = _pick_num(item, ["market_value", "value", "평가금액", "평가금액(원화)", "평가액"])
+        pnl_value = _pick_num(item, ["pnl_value", "pnl", "손익금액", "손익", "손익금액(원화)"])
+        return_pct = _pick_num(item, ["return_pct", "return", "수익률", "수익률(%)", "pnl_pct"])
+        price_krw = _pick_num(item, ["price_krw", "current_price", "price", "주가", "주가(원)", "현재가"])
+        invest_won = _pick_num(item, ["invest_won", "principal", "cost", "투자금액", "투자금액(원)", "원금"])
 
         currency = _normalize_currency(item.get("currency"))
+        if market_value is None and quantity is not None and quantity > 0 and price_krw is not None and price_krw > 0:
+            market_value = float(quantity) * float(price_krw)
+        if invest_won is None and market_value is not None and pnl_value is not None:
+            invest_won = float(market_value) - float(pnl_value)
+        if pnl_value is None and market_value is not None and invest_won is not None:
+            pnl_value = float(market_value) - float(invest_won)
         if return_pct is None and market_value is not None and pnl_value is not None:
-            principal = float(market_value) - float(pnl_value)
+            principal = float(invest_won) if invest_won is not None else (float(market_value) - float(pnl_value))
             return_pct = (float(pnl_value) / principal * 100.0) if principal != 0 else 0.0
+        if pnl_value is None and return_pct is not None and market_value is not None:
+            denom = 1.0 + float(return_pct) / 100.0
+            if denom != 0:
+                principal = float(market_value) / denom
+                pnl_value = float(market_value) - principal
 
         normalized_rows.append(
             {
@@ -8090,6 +8111,15 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
                                 load_snapshot(target_date), usd_krw_rate, force_usd_rate=True
                             )
                         merged_df = merge_holdings_overwrite(base_df_for_target, incoming_df, usd_krw_rate)
+                        target_usd_krw = float(get_usd_krw_rate_for_date(target_date)[0])
+                        company_list_for_calc = load_company_list()
+                        company_price_exact2, company_price_norm2 = build_company_price_krw_maps(company_list_for_calc)
+                        merged_df = recalculate_portfolio_from_price_and_avg_buy(
+                            merged_df,
+                            target_usd_krw,
+                            company_price_exact=company_price_exact2,
+                            company_price_norm=company_price_norm2,
+                        )
                         save_snapshot(target_date, merged_df, sync_to_github=False)
                         reflected_count = len(incoming_df)
                         if target_date == selected_date:
