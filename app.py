@@ -21,6 +21,13 @@ import requests
 import streamlit as st
 
 try:
+    from docx import Document
+
+    HAS_PYTHON_DOCX = True
+except Exception:
+    HAS_PYTHON_DOCX = False
+
+try:
     import matplotlib  # noqa: F401
 
     HAS_MATPLOTLIB = True
@@ -5064,6 +5071,108 @@ def _lines_to_text(value) -> str:
     return str(value).strip()
 
 
+def _split_report_lines(text: str) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    lines = []
+    for line in raw.splitlines():
+        ln = str(line or "").strip()
+        if not ln:
+            continue
+        ln = re.sub(r"^[\-•\*\u2022]\s*", "", ln).strip()
+        if ln:
+            lines.append(ln)
+    return lines
+
+
+def _safe_report_filename(company_name: str, ticker: str, analysis_date_value) -> str:
+    date_text = ""
+    try:
+        if hasattr(analysis_date_value, "isoformat"):
+            date_text = str(analysis_date_value.isoformat())
+        else:
+            date_text = str(analysis_date_value or "").strip()
+    except Exception:
+        date_text = ""
+    base = f"company_report_{company_name}_{ticker}_{date_text}".strip("_")
+    safe = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", base)
+    safe = re.sub(r"_+", "_", safe).strip("_.")
+    if not safe:
+        safe = f"company_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    return f"{safe}.docx"
+
+
+def build_company_analysis_docx_bytes(
+    company_name: str,
+    ticker: str,
+    analysis_date_value,
+    analysis_fields: dict,
+    financial_summary: dict | None = None,
+) -> bytes:
+    if not HAS_PYTHON_DOCX:
+        raise RuntimeError("python-docx 패키지가 설치되어 있지 않습니다.")
+
+    doc = Document()
+    title_company = str(company_name or "기업명 미입력").strip()
+    title_ticker = clean_valid_ticker(str(ticker or "").strip())
+    title_date = ""
+    try:
+        if hasattr(analysis_date_value, "strftime"):
+            title_date = analysis_date_value.strftime("%Y-%m-%d")
+        elif hasattr(analysis_date_value, "isoformat"):
+            title_date = str(analysis_date_value.isoformat())
+        else:
+            title_date = str(analysis_date_value or "").strip()
+    except Exception:
+        title_date = str(analysis_date_value or "").strip()
+
+    doc.add_heading(f"{title_company} 기업 분석 보고서", level=0)
+    subtitle = f"기준일: {title_date or '미입력'}"
+    if title_ticker:
+        subtitle = f"{subtitle} | 티커: {title_ticker}"
+    doc.add_paragraph(subtitle)
+
+    fs = financial_summary if isinstance(financial_summary, dict) else {}
+    if fs:
+        doc.add_heading("기초 정보", level=1)
+        name = str(fs.get("name") or "").strip()
+        sector = str(fs.get("sector") or fs.get("industry") or "").strip()
+        country = str(fs.get("country") or "").strip()
+        market_cap = _fmt_num_brief(fs.get("market_cap"))
+        revenue = _fmt_num_brief(fs.get("total_revenue"))
+        if name:
+            doc.add_paragraph(f"회사명: {name}")
+        if sector:
+            doc.add_paragraph(f"산업섹터: {sector}")
+        if country:
+            doc.add_paragraph(f"국가: {country}")
+        doc.add_paragraph(f"시가총액(추정): {market_cap}")
+        doc.add_paragraph(f"매출 규모(최근): {revenue}")
+
+    sections = [
+        ("기업 개요", analysis_fields.get("company_overview", "")),
+        ("핵심 제품/서비스·돈 버는 방식", analysis_fields.get("products_services", "")),
+        ("핵심 원재료/투입요소", analysis_fields.get("raw_materials", "")),
+        ("이익 증가 요인·좋은 변화(촉매)", analysis_fields.get("profit_up_factors", "")),
+        ("이익 감소 요인(리스크)", analysis_fields.get("profit_down_factors", "")),
+        ("요약 메모", analysis_fields.get("key_takeaway", "")),
+    ]
+    for section_title, section_text in sections:
+        doc.add_heading(section_title, level=1)
+        lines = _split_report_lines(section_text)
+        if lines:
+            for ln in lines:
+                doc.add_paragraph(ln, style="List Bullet")
+        else:
+            fallback_text = str(section_text or "").strip()
+            doc.add_paragraph(fallback_text or "내용 없음")
+
+    out = BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
 def generate_company_analysis_with_ai(
     company_name: str,
     ticker: str,
@@ -9499,6 +9608,45 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         key="analysis_key_takeaway",
         height=estimate_textarea_height(st.session_state.get("analysis_key_takeaway", ""), min_height=110),
     )
+
+    report_analysis = {
+        "company_overview": st.session_state.get("analysis_company_overview", ""),
+        "products_services": st.session_state.get("analysis_products_services", ""),
+        "raw_materials": st.session_state.get("analysis_raw_materials", ""),
+        "profit_up_factors": st.session_state.get("analysis_profit_up_factors", ""),
+        "profit_down_factors": st.session_state.get("analysis_profit_down_factors", ""),
+        "key_takeaway": st.session_state.get("analysis_key_takeaway", ""),
+    }
+    report_has_content = any(str(v or "").strip() for v in report_analysis.values())
+    report_company_name = (analysis_company_name_value or "").strip()
+    report_ticker = clean_valid_ticker(analysis_ticker_value)
+    report_file_name = _safe_report_filename(
+        company_name=report_company_name or "company",
+        ticker=report_ticker or "ticker",
+        analysis_date_value=st.session_state.get("analysis_date"),
+    )
+    if report_has_content:
+        if HAS_PYTHON_DOCX:
+            try:
+                report_bytes = build_company_analysis_docx_bytes(
+                    company_name=report_company_name,
+                    ticker=report_ticker,
+                    analysis_date_value=st.session_state.get("analysis_date"),
+                    analysis_fields=report_analysis,
+                    financial_summary=st.session_state.get("analysis_financial_summary_cache", {}),
+                )
+                st.download_button(
+                    "기업 분석 보고서 다운로드 (Word)",
+                    data=report_bytes,
+                    file_name=report_file_name,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="analysis_download_word_report_btn",
+                    use_container_width=False,
+                )
+            except Exception as exc:
+                st.warning(f"워드 보고서 생성 실패: {exc}")
+        else:
+            st.warning("워드 다운로드를 위해 `python-docx` 설치가 필요합니다.")
 
     if manual_save_btn:
         company_name = analysis_company_name_value
