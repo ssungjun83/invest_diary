@@ -9342,6 +9342,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         overview_df = pd.DataFrame(overview_rows)
         overview_df["현재주가(원화환산)"] = pd.to_numeric(overview_df["현재주가(원화환산)"], errors="coerce")
         overview_df["등록일시"] = pd.to_datetime(overview_df.get("등록일시"), errors="coerce")
+        overview_df = overview_df.sort_values(
+            ["등록일시", "기업명"],
+            ascending=[False, True],
+            na_position="last",
+        ).reset_index(drop=True)
         search_text = str(search_keyword or "").strip()
         if search_text:
             needle = search_text.casefold()
