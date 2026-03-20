@@ -886,6 +886,21 @@ def get_conn() -> sqlite3.Connection:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS company_profiles (
+            stock_name TEXT PRIMARY KEY,
+            ticker TEXT,
+            revenue_model TEXT,
+            business_environment TEXT,
+            watch_points TEXT,
+            source TEXT,
+            ai_model TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS company_list (
             stock_name TEXT PRIMARY KEY,
             ticker TEXT,
@@ -6218,6 +6233,9 @@ def build_company_analysis_docx_bytes(
             _docx_add_bullet(doc, line, size_pt=10.5)
 
     sections = [
+        ("돈 버는 구조·매출원", analysis_fields.get("revenue_model", "")),
+        ("사업 환경·업황·경쟁 구조", analysis_fields.get("business_environment", "")),
+        ("기업정보 체크포인트", analysis_fields.get("watch_points", "")),
         ("사업 개요·포지션", analysis_fields.get("company_overview", "")),
         ("매출 엔진·돈 버는 방식", analysis_fields.get("products_services", "")),
         ("원가 구조·민감 변수", analysis_fields.get("raw_materials", "")),
@@ -6281,6 +6299,9 @@ def generate_company_analysis_with_ai(
 - company_overview: array[string] 또는 string (사업 구조, 고객, 지역, 가격결정력, 반복매출 여부, 사이클성을 5~8개 포인트)
 - products_services: array[string] (실제 제품/서비스/브랜드/고객군/지역을 구체명으로 6~12개. 각 줄은 '무엇을 / 누구에게 / 왜 중요한지' 형식)
 - raw_materials: array[string] (실제 원재료/부품/연료/물류/설비/외주요소를 구체명으로 6~12개. 각 줄은 '항목 / 손익 민감도 / 확인할 숫자' 형식)
+- revenue_model: array[string] 또는 string (이 기업이 정확히 무엇으로 돈을 버는지 4~8개 포인트. 매출원, 고객, 반복성, 가격결정력 포함)
+- business_environment: array[string] 또는 string (사업 환경/업황/경쟁/규제/금리/원자재/공급과잉 여부 등 5~8개 포인트)
+- watch_points: array[string] 또는 string (투자자가 다음 분기/반기/연간 실적에서 확인할 체크포인트 4~8개)
 - profit_up_factors: array[string] (이익 증가 조건 + 좋은 변화/촉매 6~12개. 각 줄은 '트리거 -> 실적 영향' 형식)
 - profit_down_factors: array[string] (이익 감소 조건 + 핵심 리스크 6~12개. 각 줄은 '리스크 -> 실적 영향' 형식)
 - key_takeaway: array[string] 또는 string (투자자가 바로 참고할 결론 5~8개. 한 줄 결론, 좋아지는 조건, 꺼려야 할 신호, 다음 실적 체크포인트, 밸류/재무 해석 포함)
@@ -6294,6 +6315,7 @@ def generate_company_analysis_with_ai(
 6) 미래 아이템/신규 사업/신규 투자 파이프라인 최소 3개 이상
 7) 투자자가 다음 분기/반기 실적에서 확인해야 할 숫자와 문장을 직접 제시
 8) 밸류에이션/재무구조 해석을 일반론이 아니라 현재 숫자 기준으로 코멘트
+9) 사업 환경 설명에는 업황, 경쟁강도, 가격결정력, 조달/원가, 규제, 금리/환율 영향까지 포함
 
 주의:
 - 추정 표현은 명시(예: 추정/가정)
@@ -6324,6 +6346,9 @@ def generate_company_analysis_with_ai(
         "company_overview",
         "products_services",
         "raw_materials",
+        "revenue_model",
+        "business_environment",
+        "watch_points",
         "profit_up_factors",
         "profit_down_factors",
         "key_takeaway",
@@ -6382,6 +6407,15 @@ def generate_company_analysis_with_ai(
         "raw_materials": _lines_to_text(
             _pick(parsed_obj, "raw_materials", "inputs", "cost_drivers", "rawMaterials", "핵심원재료투입요소")
         ),
+        "revenue_model": _lines_to_text(
+            _pick(parsed_obj, "revenue_model", "revenueModel", "money_making", "돈버는구조", "매출구조")
+        ),
+        "business_environment": _lines_to_text(
+            _pick(parsed_obj, "business_environment", "businessEnvironment", "environment", "업황환경", "사업환경")
+        ),
+        "watch_points": _lines_to_text(
+            _pick(parsed_obj, "watch_points", "watchPoints", "checkpoints", "체크포인트")
+        ),
         "profit_up_factors": _lines_to_text(
             _pick(parsed_obj, "profit_up_factors", "upside", "profitUpFactors", "이익증가요인")
         ),
@@ -6392,6 +6426,15 @@ def generate_company_analysis_with_ai(
             _pick(parsed_obj, "key_takeaway", "takeaway", "summary", "keyTakeaway", "요약메모")
         ),
     }
+    profile_draft = build_company_profile_draft(
+        company_name=company_name,
+        ticker=ticker,
+        analysis_fields=analysis,
+        financial_summary=financial_summary,
+    )
+    for key in ["revenue_model", "business_environment", "watch_points"]:
+        if not str(analysis.get(key) or "").strip():
+            analysis[key] = profile_draft.get(key, "")
     if not any((analysis.get(k) or "").strip() for k in analysis.keys()):
         return {}, "AI 응답 JSON에 분석 본문이 비어 있습니다.", google_research_note
     return analysis, "", google_research_note
@@ -6571,6 +6614,59 @@ def build_company_investment_digest(
     }
 
 
+def build_company_profile_draft(
+    company_name: str,
+    ticker: str,
+    analysis_fields: dict | None,
+    financial_summary: dict | None = None,
+) -> dict:
+    fields = analysis_fields if isinstance(analysis_fields, dict) else {}
+    fs = financial_summary if isinstance(financial_summary, dict) else {}
+    digest = build_company_investment_digest(company_name, ticker, fields, fs)
+
+    revenue_lines = _split_report_lines(fields.get("revenue_model", ""))
+    if not revenue_lines:
+        revenue_lines = _split_report_lines(fields.get("products_services", ""))[:6]
+    if not revenue_lines:
+        sector = str(fs.get("sector") or fs.get("industry") or "해당 업종").strip()
+        revenue_lines = [
+            f"{company_name or '해당 기업'}는 {sector} 관련 제품/서비스 판매에서 매출이 발생합니다.",
+            "무엇을 누구에게 파는지, 반복매출인지 일회성 매출인지 먼저 확인해야 합니다.",
+            "가격 전가력과 고객 집중도가 이익 안정성에 큰 영향을 줍니다.",
+        ]
+
+    environment_lines = _split_report_lines(fields.get("business_environment", ""))
+    if not environment_lines:
+        raw_lines = _split_report_lines(fields.get("raw_materials", ""))
+        up_lines = _split_report_lines(fields.get("profit_up_factors", ""))
+        down_lines = _split_report_lines(fields.get("profit_down_factors", ""))
+        for line in raw_lines[:3] + up_lines[:2] + down_lines[:2]:
+            if line not in environment_lines:
+                environment_lines.append(line)
+    if not environment_lines:
+        environment_lines = [
+            "사업 환경은 수요, 가격, 경쟁, 규제, 금리/환율 변화에 영향을 받습니다.",
+            "업황이 좋아질 때와 나빠질 때 어떤 지표가 먼저 움직이는지 확인이 필요합니다.",
+            "CAPEX, 차입부담, 공급과잉 여부가 장기 수익성에 큰 영향을 줄 수 있습니다.",
+        ]
+
+    watch_lines = _split_report_lines(fields.get("watch_points", ""))
+    if not watch_lines:
+        watch_lines = [str(v).strip() for v in digest.get("watch_points", []) if str(v).strip()]
+    if not watch_lines:
+        watch_lines = [
+            "매출 성장률과 영업이익률이 같이 개선되는지 확인",
+            "영업현금흐름이 순이익과 같이 움직이는지 확인",
+            "차입 부담과 신규 투자 집행이 재무를 훼손하지 않는지 확인",
+        ]
+
+    return {
+        "revenue_model": _lines_to_text(revenue_lines[:8]),
+        "business_environment": _lines_to_text(environment_lines[:8]),
+        "watch_points": _lines_to_text(watch_lines[:8]),
+    }
+
+
 def _extract_facts_from_google_context(google_context_text: str, limit: int = 8) -> list[str]:
     text = str(google_context_text or "").strip()
     if not text:
@@ -6683,7 +6779,7 @@ def generate_company_analysis_template(
         f"[밸류/재무] 현재 숫자는 PER {pe_text}, PBR {pb_text}, 부채 관련 지표 {debt_text} 수준으로 해석이 필요합니다.",
     ]
 
-    return {
+    analysis = {
         "company_overview": _lines_to_text(base_overview),
         "products_services": _lines_to_text(products),
         "raw_materials": _lines_to_text(raw_materials),
@@ -6691,6 +6787,14 @@ def generate_company_analysis_template(
         "profit_down_factors": _lines_to_text(down_factors),
         "key_takeaway": _lines_to_text(takeaway),
     }
+    profile_draft = build_company_profile_draft(
+        company_name=name,
+        ticker=tkr,
+        analysis_fields=analysis,
+        financial_summary=summary,
+    )
+    analysis.update(profile_draft)
+    return analysis
 
 
 def save_company_analysis(
@@ -6807,6 +6911,122 @@ def load_company_analysis_history(stock_name: str | None = None) -> pd.DataFrame
 
     if not df.empty:
         df["analysis_date"] = pd.to_datetime(df["analysis_date"])
+    return df
+
+
+def save_company_profile(
+    stock_name: str,
+    ticker: str,
+    revenue_model: str,
+    business_environment: str,
+    watch_points: str,
+    source: str = "manual",
+    ai_model: str = "",
+) -> None:
+    name = str(stock_name or "").strip()
+    if not name:
+        return
+
+    now_str = datetime.now().isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT created_at FROM company_profiles WHERE stock_name = ?",
+            (name,),
+        ).fetchone()
+        created_at = str(row[0] or "").strip() if row and row[0] else now_str
+        conn.execute(
+            """
+            INSERT INTO company_profiles (
+                stock_name,
+                ticker,
+                revenue_model,
+                business_environment,
+                watch_points,
+                source,
+                ai_model,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(stock_name) DO UPDATE SET
+                ticker = excluded.ticker,
+                revenue_model = excluded.revenue_model,
+                business_environment = excluded.business_environment,
+                watch_points = excluded.watch_points,
+                source = excluded.source,
+                ai_model = excluded.ai_model,
+                updated_at = excluded.updated_at
+            """,
+            (
+                name,
+                clean_valid_ticker(ticker) or None,
+                str(revenue_model or "").strip() or None,
+                str(business_environment or "").strip() or None,
+                str(watch_points or "").strip() or None,
+                str(source or "").strip() or None,
+                str(ai_model or "").strip() or None,
+                created_at,
+                now_str,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_company_profile(stock_name: str) -> dict:
+    name = str(stock_name or "").strip()
+    if not name:
+        return {}
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT stock_name, ticker, revenue_model, business_environment, watch_points, source, ai_model, created_at, updated_at
+            FROM company_profiles
+            WHERE stock_name = ?
+            """,
+            (name,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {}
+    return {
+        "stock_name": str(row[0] or "").strip(),
+        "ticker": clean_valid_ticker(str(row[1] or "")),
+        "revenue_model": str(row[2] or "").strip(),
+        "business_environment": str(row[3] or "").strip(),
+        "watch_points": str(row[4] or "").strip(),
+        "source": str(row[5] or "").strip(),
+        "ai_model": str(row[6] or "").strip(),
+        "created_at": str(row[7] or "").strip(),
+        "updated_at": str(row[8] or "").strip(),
+    }
+
+
+def load_company_profiles() -> pd.DataFrame:
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                stock_name,
+                ticker,
+                revenue_model,
+                business_environment,
+                watch_points,
+                source,
+                ai_model,
+                created_at,
+                updated_at
+            FROM company_profiles
+            ORDER BY updated_at DESC, stock_name
+            """,
+            conn,
+        )
+    finally:
+        conn.close()
     return df
 
 
@@ -9785,12 +10005,18 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.rerun()
 
     analysis_all = load_company_analysis_history()
+    company_profile_df = load_company_profiles()
     company_list_df = load_company_list()
     stock_names = get_holding_stock_names(current_df)
     market_pref_map = build_market_preference_map(current_df)
     analyzed_names = analysis_all["stock_name"].dropna().astype(str).unique().tolist() if not analysis_all.empty else []
+    profiled_names = (
+        company_profile_df["stock_name"].dropna().astype(str).unique().tolist()
+        if not company_profile_df.empty
+        else []
+    )
     listed_names = company_list_df["stock_name"].dropna().astype(str).unique().tolist() if not company_list_df.empty else []
-    options = sorted(set(stock_names + analyzed_names + listed_names))
+    options = sorted(set(stock_names + analyzed_names + listed_names + profiled_names))
 
     if "analysis_date" not in st.session_state:
         st.session_state["analysis_date"] = date.today()
@@ -9838,6 +10064,14 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_prev_company"] = ""
     if "analysis_financial_summary_cache" not in st.session_state:
         st.session_state["analysis_financial_summary_cache"] = {}
+    if "analysis_profile_revenue_model" not in st.session_state:
+        st.session_state["analysis_profile_revenue_model"] = ""
+    if "analysis_profile_business_environment" not in st.session_state:
+        st.session_state["analysis_profile_business_environment"] = ""
+    if "analysis_profile_watch_points" not in st.session_state:
+        st.session_state["analysis_profile_watch_points"] = ""
+    if "analysis_saved_profile_name" not in st.session_state:
+        st.session_state["analysis_saved_profile_name"] = "선택안함"
     if "analysis_company_name_pending" in st.session_state:
         next_name = (st.session_state.pop("analysis_company_name_pending") or "").strip()
         st.session_state["analysis_company_name_input"] = next_name
@@ -9854,6 +10088,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.success(st.session_state.pop("analysis_new_company_ticker_notice"))
     if "analysis_builtin_reconcile_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_builtin_reconcile_notice"))
+    if "analysis_company_profile_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_company_profile_notice"))
+    if "analysis_company_profile_warning" in st.session_state:
+        st.warning(st.session_state.pop("analysis_company_profile_warning"))
     for key in [
         "analysis_company_overview",
         "analysis_products_services",
@@ -9898,6 +10136,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         "analysis_selected_overview_company",
         "analysis_selected_overview_ticker_input",
         "analysis_selected_overview_sector_input",
+        "analysis_profile_revenue_model",
+        "analysis_profile_business_environment",
+        "analysis_profile_watch_points",
+        "analysis_saved_profile_name",
     ]:
         st.session_state[key] = _sanitize_widget_text(st.session_state.get(key), "")
     st.session_state["analysis_company_hint"] = _sanitize_widget_text(
@@ -10767,6 +11009,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     if company_name and company_name != st.session_state.get("analysis_prev_company"):
         if not analysis_ticker_value:
             st.session_state["analysis_ticker_source"] = ""
+        st.session_state["analysis_profile_revenue_model"] = ""
+        st.session_state["analysis_profile_business_environment"] = ""
+        st.session_state["analysis_profile_watch_points"] = ""
         st.session_state["analysis_prev_company"] = company_name
 
         latest_df = analysis_all[analysis_all["stock_name"] == company_name] if not analysis_all.empty else pd.DataFrame()
@@ -10781,6 +11026,131 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             st.session_state["analysis_profit_up_factors"] = latest.get("profit_up_factors") or ""
             st.session_state["analysis_profit_down_factors"] = latest.get("profit_down_factors") or ""
             st.session_state["analysis_key_takeaway"] = latest.get("note") or ""
+
+    st.markdown("#### 저장형 기업정보")
+    st.caption("이 기업이 무엇으로 돈을 벌고, 어떤 사업 환경에서 움직이는지 따로 저장해두고 언제든 다시 불러올 수 있습니다.")
+    saved_profile_options = ["선택안함"] + sorted(set(profiled_names))
+    if st.session_state.get("analysis_saved_profile_name") not in saved_profile_options:
+        st.session_state["analysis_saved_profile_name"] = "선택안함"
+    current_saved_profile = load_company_profile(company_name) if company_name else {}
+
+    profile_ctrl_col1, profile_ctrl_col2, profile_ctrl_col3, profile_ctrl_col4 = st.columns([1.25, 0.9, 1.1, 0.9])
+    with profile_ctrl_col1:
+        selected_profile_name = st.selectbox(
+            "저장된 기업정보",
+            saved_profile_options,
+            key="analysis_saved_profile_name",
+        )
+    with profile_ctrl_col2:
+        load_profile_btn = st.button("기업정보 불러오기", key="analysis_load_company_profile_btn")
+    with profile_ctrl_col3:
+        draft_profile_btn = st.button("현재 분석 기반 초안 채우기", key="analysis_draft_company_profile_btn")
+    with profile_ctrl_col4:
+        save_profile_btn = st.button("기업정보 저장", key="analysis_save_company_profile_btn")
+
+    if current_saved_profile:
+        st.caption(
+            f"현재 기업 저장본 있음: {current_saved_profile.get('updated_at') or '-'} / "
+            f"{current_saved_profile.get('source') or 'manual'}"
+        )
+
+    if load_profile_btn:
+        target_profile_name = selected_profile_name if selected_profile_name != "선택안함" else company_name
+        if not target_profile_name:
+            st.session_state["analysis_company_profile_warning"] = "불러올 기업정보를 먼저 선택해 주세요."
+            st.rerun()
+        loaded_profile = load_company_profile(target_profile_name)
+        if not loaded_profile:
+            st.session_state["analysis_company_profile_warning"] = f"{target_profile_name} 저장형 기업정보가 없습니다."
+            st.rerun()
+        st.session_state["analysis_company_name_pending"] = loaded_profile.get("stock_name", "")
+        st.session_state["analysis_ticker_pending"] = loaded_profile.get("ticker", "")
+        st.session_state["analysis_profile_revenue_model"] = loaded_profile.get("revenue_model", "")
+        st.session_state["analysis_profile_business_environment"] = loaded_profile.get("business_environment", "")
+        st.session_state["analysis_profile_watch_points"] = loaded_profile.get("watch_points", "")
+        st.session_state["analysis_company_profile_notice"] = f"{target_profile_name} 저장형 기업정보를 불러왔습니다."
+        st.rerun()
+
+    current_analysis_fields = {
+        "company_overview": st.session_state.get("analysis_company_overview", ""),
+        "products_services": st.session_state.get("analysis_products_services", ""),
+        "raw_materials": st.session_state.get("analysis_raw_materials", ""),
+        "profit_up_factors": st.session_state.get("analysis_profit_up_factors", ""),
+        "profit_down_factors": st.session_state.get("analysis_profit_down_factors", ""),
+        "key_takeaway": st.session_state.get("analysis_key_takeaway", ""),
+    }
+    if draft_profile_btn:
+        if not company_name:
+            st.session_state["analysis_company_profile_warning"] = "기업명을 먼저 입력한 뒤 초안을 만들어 주세요."
+            st.rerun()
+        profile_draft = build_company_profile_draft(
+            company_name=company_name,
+            ticker=analysis_ticker_value,
+            analysis_fields=current_analysis_fields,
+            financial_summary=st.session_state.get("analysis_financial_summary_cache", {}),
+        )
+        st.session_state["analysis_profile_revenue_model"] = profile_draft.get("revenue_model", "")
+        st.session_state["analysis_profile_business_environment"] = profile_draft.get("business_environment", "")
+        st.session_state["analysis_profile_watch_points"] = profile_draft.get("watch_points", "")
+        st.session_state["analysis_company_profile_notice"] = f"{company_name} 기준 저장형 기업정보 초안을 채웠습니다."
+        st.rerun()
+
+    if save_profile_btn:
+        if not company_name:
+            st.session_state["analysis_company_profile_warning"] = "저장할 기업명을 먼저 입력해 주세요."
+            st.rerun()
+        revenue_model_text = st.session_state.get("analysis_profile_revenue_model", "")
+        business_environment_text = st.session_state.get("analysis_profile_business_environment", "")
+        watch_points_text = st.session_state.get("analysis_profile_watch_points", "")
+        if not any(str(v or "").strip() for v in [revenue_model_text, business_environment_text, watch_points_text]):
+            st.session_state["analysis_company_profile_warning"] = "저장할 기업정보 내용이 없습니다."
+            st.rerun()
+        save_company_profile(
+            stock_name=company_name,
+            ticker=analysis_ticker_value,
+            revenue_model=revenue_model_text,
+            business_environment=business_environment_text,
+            watch_points=watch_points_text,
+            source="manual_profile",
+            ai_model=f"{ai_provider_label(analysis_ai_provider)}:{analysis_ai_model}",
+        )
+        st.session_state["analysis_saved_profile_name"] = company_name
+        st.session_state["analysis_company_profile_notice"] = f"{company_name} 저장형 기업정보를 저장했습니다."
+        st.rerun()
+
+    st.text_area(
+        "돈 버는 구조·매출원",
+        key="analysis_profile_revenue_model",
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_profile_revenue_model", ""),
+            min_height=100,
+            max_height=320,
+            chars_per_line=62,
+        ),
+        help="무엇을 누구에게 팔아 돈을 버는지, 반복매출인지, 가격결정력이 있는지 적습니다.",
+    )
+    st.text_area(
+        "사업 환경·업황·경쟁 구조",
+        key="analysis_profile_business_environment",
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_profile_business_environment", ""),
+            min_height=110,
+            max_height=360,
+            chars_per_line=62,
+        ),
+        help="수요, 경쟁, 규제, 금리/환율, 공급과잉, 원가 구조 등 사업 환경을 적습니다.",
+    )
+    st.text_area(
+        "기업정보 체크포인트",
+        key="analysis_profile_watch_points",
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_profile_watch_points", ""),
+            min_height=90,
+            max_height=280,
+            chars_per_line=62,
+        ),
+        help="다음 실적/공시에서 확인할 숫자와 문장을 적습니다.",
+    )
 
     action_col1, action_col2, action_col3 = st.columns([1, 1.4, 1])
     with action_col1:
@@ -10925,6 +11295,24 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             st.session_state["analysis_profit_up_factors"] = analysis.get("profit_up_factors", "")
             st.session_state["analysis_profit_down_factors"] = analysis.get("profit_down_factors", "")
             st.session_state["analysis_key_takeaway"] = analysis.get("key_takeaway", "")
+            profile_draft = build_company_profile_draft(
+                company_name=company_name,
+                ticker=ticker,
+                analysis_fields=analysis,
+                financial_summary=financial_summary,
+            )
+            st.session_state["analysis_profile_revenue_model"] = analysis.get(
+                "revenue_model",
+                profile_draft.get("revenue_model", ""),
+            )
+            st.session_state["analysis_profile_business_environment"] = analysis.get(
+                "business_environment",
+                profile_draft.get("business_environment", ""),
+            )
+            st.session_state["analysis_profile_watch_points"] = analysis.get(
+                "watch_points",
+                profile_draft.get("watch_points", ""),
+            )
             save_company_analysis(
                 analysis_date=st.session_state["analysis_date"],
                 stock_name=company_name,
@@ -10935,6 +11323,16 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 ai_model=f"{ai_provider_label(used_ai_provider)}:{used_ai_model}",
                 note=analysis.get("key_takeaway", ""),
             )
+            save_company_profile(
+                stock_name=company_name,
+                ticker=ticker,
+                revenue_model=st.session_state.get("analysis_profile_revenue_model", ""),
+                business_environment=st.session_state.get("analysis_profile_business_environment", ""),
+                watch_points=st.session_state.get("analysis_profile_watch_points", ""),
+                source=f"ai_profile:{used_ai_provider}",
+                ai_model=f"{ai_provider_label(used_ai_provider)}:{used_ai_model}",
+            )
+            st.session_state["analysis_saved_profile_name"] = company_name
             upsert_company_list_entry(
                 company_name,
                 ticker,
@@ -11051,6 +11449,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     )
 
     report_analysis = {
+        "revenue_model": st.session_state.get("analysis_profile_revenue_model", ""),
+        "business_environment": st.session_state.get("analysis_profile_business_environment", ""),
+        "watch_points": st.session_state.get("analysis_profile_watch_points", ""),
         "company_overview": st.session_state.get("analysis_company_overview", ""),
         "products_services": st.session_state.get("analysis_products_services", ""),
         "raw_materials": st.session_state.get("analysis_raw_materials", ""),
@@ -11133,6 +11534,24 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 ai_model=f"{ai_provider_label(analysis_ai_provider)}:{analysis_ai_model}",
                 note=st.session_state.get("analysis_key_takeaway", ""),
             )
+            if any(
+                str(v or "").strip()
+                for v in [
+                    st.session_state.get("analysis_profile_revenue_model", ""),
+                    st.session_state.get("analysis_profile_business_environment", ""),
+                    st.session_state.get("analysis_profile_watch_points", ""),
+                ]
+            ):
+                save_company_profile(
+                    stock_name=company_name,
+                    ticker=ticker,
+                    revenue_model=st.session_state.get("analysis_profile_revenue_model", ""),
+                    business_environment=st.session_state.get("analysis_profile_business_environment", ""),
+                    watch_points=st.session_state.get("analysis_profile_watch_points", ""),
+                    source="manual_profile",
+                    ai_model=f"{ai_provider_label(analysis_ai_provider)}:{analysis_ai_model}",
+                )
+                st.session_state["analysis_saved_profile_name"] = company_name
             upsert_company_list_entry(
                 company_name,
                 ticker,
