@@ -3901,6 +3901,608 @@ def extract_company_watchlist_from_image_with_ai(
     return normalized_rows, ""
 
 
+def _normalize_value_chain_stage_name(value: str) -> str:
+    text = str(value or "").strip()
+    low = text.lower()
+    if ("업스트림" in text) or ("upstream" in low):
+        return "업스트림"
+    if ("미드스트림" in text) or ("midstream" in low):
+        return "미드스트림"
+    if ("다운스트림" in text) or ("downstream" in low):
+        return "다운스트림"
+    return text or "기타"
+
+
+def _normalize_value_chain_payload(parsed) -> dict:
+    chain_name = ""
+    rows: list[dict] = []
+
+    def _to_company_list(value) -> list[str]:
+        if isinstance(value, list):
+            out = []
+            for item in value:
+                nm = str(item or "").strip()
+                if nm:
+                    out.append(nm)
+            return out
+        if isinstance(value, str):
+            parts = re.split(r"[,/·\n|]", value)
+            return [p.strip() for p in parts if p.strip()]
+        return []
+
+    def _append_row(stage: str, segment: str, companies) -> None:
+        stg = _normalize_value_chain_stage_name(stage)
+        seg = str(segment or "").strip() or "기타"
+        comps = []
+        seen = set()
+        for nm in _to_company_list(companies):
+            key = normalize_company_name_for_match(nm)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            comps.append(nm)
+        if comps:
+            rows.append({"stage": stg, "segment": seg, "companies": comps})
+
+    if isinstance(parsed, dict):
+        chain_name = str(parsed.get("chain_name") or parsed.get("value_chain_name") or parsed.get("name") or "").strip()
+        stage_items = parsed.get("stages")
+        if isinstance(stage_items, list):
+            for item in stage_items:
+                if not isinstance(item, dict):
+                    continue
+                stage = item.get("stage") or item.get("stage_name") or item.get("단계")
+                segment = item.get("segment") or item.get("sub_stage") or item.get("세부단계") or item.get("category")
+                if isinstance(item.get("segments"), list):
+                    for seg in item.get("segments"):
+                        if not isinstance(seg, dict):
+                            continue
+                        _append_row(
+                            stage=stage,
+                            segment=seg.get("segment") or seg.get("name") or seg.get("세부단계") or segment,
+                            companies=seg.get("companies") or seg.get("기업들") or [],
+                        )
+                else:
+                    _append_row(
+                        stage=stage,
+                        segment=segment,
+                        companies=item.get("companies") or item.get("company_names") or item.get("기업들") or [],
+                    )
+
+        stage_key_map = {"upstream": "업스트림", "midstream": "미드스트림", "downstream": "다운스트림"}
+        for raw_key, stage_label in stage_key_map.items():
+            bucket = parsed.get(raw_key)
+            if not bucket:
+                continue
+            if isinstance(bucket, dict):
+                for seg_name, seg_companies in bucket.items():
+                    _append_row(stage_label, str(seg_name), seg_companies)
+            elif isinstance(bucket, list):
+                for item in bucket:
+                    if isinstance(item, dict):
+                        _append_row(
+                            stage_label,
+                            item.get("segment") or item.get("name") or item.get("세부단계") or "기타",
+                            item.get("companies") or item.get("기업들") or [],
+                        )
+                    elif isinstance(item, str):
+                        _append_row(stage_label, "기타", [item])
+            elif isinstance(bucket, str):
+                _append_row(stage_label, "기타", bucket)
+
+    elif isinstance(parsed, list):
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            _append_row(
+                stage=item.get("stage") or item.get("단계") or "기타",
+                segment=item.get("segment") or item.get("세부단계") or item.get("category") or "기타",
+                companies=item.get("companies") or item.get("기업들") or item.get("company") or [],
+            )
+
+    merged: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        key = (str(row.get("stage") or "기타"), str(row.get("segment") or "기타"))
+        if key not in merged:
+            merged[key] = []
+        existing_norm = {normalize_company_name_for_match(v) for v in merged[key]}
+        for nm in row.get("companies") or []:
+            nkey = normalize_company_name_for_match(nm)
+            if not nkey or nkey in existing_norm:
+                continue
+            merged[key].append(str(nm).strip())
+            existing_norm.add(nkey)
+
+    norm_rows = [{"stage": k[0], "segment": k[1], "companies": v} for k, v in merged.items() if v]
+    chain_name = chain_name or "밸류체인"
+    return {"chain_name": chain_name, "rows": norm_rows}
+
+
+def extract_value_chain_from_image_with_ai(
+    image_bytes: bytes,
+    mime_type: str,
+    provider: str,
+    api_key: str,
+    model: str,
+) -> tuple[dict, str]:
+    key = (api_key or "").strip()
+    if not key:
+        return {}, "API 설정 탭에서 AI API 키를 먼저 저장해 주세요."
+    if not image_bytes:
+        return {}, "이미지 데이터가 비어 있습니다."
+
+    normalized_provider = normalize_ai_provider(provider)
+    selected_model = (
+        str(model).strip()
+        or (DEFAULT_CLAUDE_MODEL if normalized_provider == "claude" else DEFAULT_OPENAI_MODEL)
+    )
+    media_type = str(mime_type or "image/png").strip().lower()
+    if not media_type.startswith("image/"):
+        media_type = "image/png"
+
+    system_prompt = (
+        "너는 산업 밸류체인 이미지 OCR/구조화 엔진이다. "
+        "이미지의 단계-세부공정-기업명을 읽고 JSON만 출력한다."
+    )
+    user_prompt = """
+다음 형식 JSON만 출력:
+{
+  "chain_name": "예: LNG 밸류체인",
+  "stages": [
+    {
+      "stage": "업스트림/미드스트림/다운스트림",
+      "segment": "세부 공정명(예: 운반, 피팅밸브, 강관)",
+      "companies": ["기업명1", "기업명2"]
+    }
+  ]
+}
+
+규칙:
+- 이미지에서 읽은 텍스트만 사용하고 추측 금지
+- 기업명은 가능한 정확히
+- 단계/세부공정이 불명확하면 "기타" 사용
+- 설명문 없이 JSON만 출력
+""".strip()
+
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    try:
+        if normalized_provider == "claude":
+            body = {
+                "model": selected_model,
+                "max_tokens": 2200,
+                "temperature": 0.0,
+                "system": system_prompt,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": media_type, "data": image_b64},
+                            },
+                            {"type": "text", "text": user_prompt},
+                        ],
+                    }
+                ],
+            }
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=35,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            pieces = []
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    pieces.append(str(block.get("text", "")))
+            text = "\n".join([p for p in pieces if p]).strip()
+        else:
+            data_url = f"data:{media_type};base64,{image_b64}"
+            body = {
+                "model": selected_model,
+                "input": [
+                    {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": user_prompt},
+                            {"type": "input_image", "image_url": data_url},
+                        ],
+                    },
+                ],
+                "temperature": 0.0,
+                "max_output_tokens": 2200,
+            }
+            resp = requests.post(
+                "https://api.openai.com/v1/responses",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body,
+                timeout=35,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = _extract_openai_output_text(data)
+    except Exception as exc:
+        return {}, f"{ai_provider_label(normalized_provider)} 이미지 분석 실패: {exc}"
+
+    if not text:
+        return {}, "AI 응답이 비어 있습니다."
+    parsed = _extract_json_from_text(text)
+    if not parsed:
+        return {}, f"AI 응답에서 JSON을 파싱하지 못했습니다. 원인: {_json_parse_failure_reason(text)}"
+    normalized = _normalize_value_chain_payload(parsed)
+    if not normalized.get("rows"):
+        return {}, "이미지에서 밸류체인 단계/기업 정보를 충분히 읽지 못했습니다."
+    return normalized, ""
+
+
+def _match_value_chain_company_name(
+    raw_name: str,
+    watch_names: list[str],
+    watch_ticker_map: dict[str, str] | None = None,
+) -> tuple[str, float]:
+    name = str(raw_name or "").strip()
+    if not name:
+        return "", 0.0
+    ticker_map = watch_ticker_map or {}
+    nkey = normalize_company_name_for_match(name)
+
+    # 티커 단독 입력인 경우 우선 매칭
+    maybe_ticker = clean_valid_ticker(name)
+    if maybe_ticker:
+        for wn, wt in ticker_map.items():
+            if clean_valid_ticker(wt) == maybe_ticker:
+                return wn, 1.0
+
+    if nkey:
+        exact = []
+        for wn in watch_names:
+            if normalize_company_name_for_match(wn) == nkey:
+                exact.append(wn)
+        if len(exact) == 1:
+            return exact[0], 1.0
+        if len(exact) > 1:
+            return exact[0], 0.95
+
+    best_name = ""
+    best_score = 0.0
+    for wn in watch_names:
+        sim = _name_similarity(name, wn)
+        if nkey and normalize_company_name_for_match(wn).find(nkey) >= 0:
+            sim = max(sim, 0.9)
+        if sim > best_score:
+            best_score = float(sim)
+            best_name = wn
+    if best_score >= 0.74:
+        return best_name, best_score
+    return "", best_score
+
+
+def _build_value_chain_match_rows(chain_payload: dict, company_list_df: pd.DataFrame) -> list[dict]:
+    rows = chain_payload.get("rows") if isinstance(chain_payload, dict) else []
+    if not isinstance(rows, list):
+        return []
+    cl_df = company_list_df if isinstance(company_list_df, pd.DataFrame) else pd.DataFrame()
+    watch_names = cl_df["stock_name"].dropna().astype(str).str.strip().tolist() if not cl_df.empty else []
+    watch_names = [v for v in watch_names if v]
+    watch_ticker_map = {}
+    watch_sector_map = {}
+    if not cl_df.empty:
+        for _, rr in cl_df.iterrows():
+            nm = str(rr.get("stock_name") or "").strip()
+            if not nm:
+                continue
+            watch_ticker_map[nm] = clean_valid_ticker(str(rr.get("ticker") or ""))
+            watch_sector_map[nm] = str(rr.get("sector") or "").strip()
+
+    matched_rows: list[dict] = []
+    for row in rows:
+        stage = str(row.get("stage") or "기타").strip() or "기타"
+        segment = str(row.get("segment") or "기타").strip() or "기타"
+        companies = row.get("companies") if isinstance(row.get("companies"), list) else []
+        for raw_name in companies:
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            matched_name, score = _match_value_chain_company_name(name, watch_names, watch_ticker_map=watch_ticker_map)
+            matched_rows.append(
+                {
+                    "stage": _normalize_value_chain_stage_name(stage),
+                    "segment": segment,
+                    "input_company": name,
+                    "matched_company": matched_name,
+                    "matched": bool(matched_name),
+                    "match_score": float(score),
+                    "ticker": watch_ticker_map.get(matched_name, "") if matched_name else "",
+                    "sector": watch_sector_map.get(matched_name, "") if matched_name else "",
+                }
+            )
+    return matched_rows
+
+
+def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
+    if not match_rows:
+        return None
+    df = pd.DataFrame(match_rows)
+    if df.empty:
+        return None
+
+    stage_order = ["업스트림", "미드스트림", "다운스트림"]
+    df["stage_order"] = df["stage"].apply(lambda s: stage_order.index(s) if s in stage_order else 99)
+    df = df.sort_values(["stage_order", "segment", "input_company"]).copy()
+
+    nodes: list[str] = []
+    node_index: dict[str, int] = {}
+
+    def _idx(name: str) -> int:
+        if name not in node_index:
+            node_index[name] = len(nodes)
+            nodes.append(name)
+        return node_index[name]
+
+    links_source = []
+    links_target = []
+    links_value = []
+    links_color = []
+
+    stage_color = {"업스트림": "#2563eb", "미드스트림": "#0f766e", "다운스트림": "#ea580c", "기타": "#64748b"}
+
+    stage_seg_counts = df.groupby(["stage", "segment"]).size().reset_index(name="cnt")
+    for _, r in stage_seg_counts.iterrows():
+        s = str(r["stage"])
+        seg = f"{s} | {str(r['segment'])}"
+        links_source.append(_idx(s))
+        links_target.append(_idx(seg))
+        links_value.append(float(r["cnt"]))
+        links_color.append("rgba(148,163,184,0.35)")
+
+    seg_company_counts = df.groupby(["stage", "segment", "input_company", "matched"]).size().reset_index(name="cnt")
+    for _, r in seg_company_counts.iterrows():
+        s = str(r["stage"])
+        seg = f"{s} | {str(r['segment'])}"
+        cname = str(r["input_company"])
+        label = f"{cname} {'(매칭)' if bool(r['matched']) else '(미매칭)'}"
+        links_source.append(_idx(seg))
+        links_target.append(_idx(label))
+        links_value.append(float(r["cnt"]))
+        links_color.append("rgba(16,185,129,0.35)" if bool(r["matched"]) else "rgba(239,68,68,0.30)")
+
+    node_colors = []
+    for n in nodes:
+        if n in stage_color:
+            node_colors.append(stage_color.get(n, "#64748b"))
+        elif " | " in n:
+            stage_name = n.split(" | ", 1)[0]
+            base = stage_color.get(stage_name, "#64748b")
+            node_colors.append(base)
+        elif "(매칭)" in n:
+            node_colors.append("#16a34a")
+        else:
+            node_colors.append("#dc2626")
+
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                arrangement="snap",
+                node=dict(label=nodes, pad=15, thickness=16, color=node_colors),
+                link=dict(source=links_source, target=links_target, value=links_value, color=links_color),
+            )
+        ]
+    )
+    fig.update_layout(
+        title=f"{chain_name} 매칭 흐름",
+        font=dict(size=11, family="Noto Sans KR"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=45, b=10),
+    )
+    return fig
+
+
+def _build_value_chain_rows_brief_text(match_rows: list[dict], max_stage_segments: int = 24) -> str:
+    if not match_rows:
+        return ""
+    df = pd.DataFrame(match_rows)
+    if df.empty:
+        return ""
+
+    stage_order = {"업스트림": 0, "미드스트림": 1, "다운스트림": 2}
+    df["stage_order"] = df["stage"].map(stage_order).fillna(99)
+    grouped = (
+        df.groupby(["stage", "segment"], dropna=False)["input_company"]
+        .apply(lambda s: sorted({str(v).strip() for v in s if str(v).strip()}))
+        .reset_index()
+        .sort_values(["stage_order", "segment"])
+    )
+    lines = []
+    for idx, row in grouped.head(max_stage_segments).iterrows():
+        stage = str(row.get("stage") or "기타").strip() or "기타"
+        segment = str(row.get("segment") or "기타").strip() or "기타"
+        comps = row.get("input_company") if isinstance(row.get("input_company"), list) else []
+        comp_text = ", ".join(comps[:12]) if comps else "-"
+        lines.append(f"- {stage} > {segment}: {comp_text}")
+    return "\n".join(lines)
+
+
+def generate_value_chain_overview_with_ai(
+    chain_name: str,
+    match_rows: list[dict],
+    provider: str,
+    api_key: str,
+    model: str,
+) -> tuple[str, str, str]:
+    key = (api_key or "").strip()
+    if not key:
+        return "", "API 설정 탭에서 AI API 키를 먼저 저장해 주세요.", ""
+
+    rows_df = pd.DataFrame(match_rows) if isinstance(match_rows, list) else pd.DataFrame()
+    if rows_df.empty:
+        return "", "밸류체인 매칭 데이터가 비어 있습니다.", ""
+
+    matched_names = []
+    for v in rows_df["matched_company"].dropna().astype(str).tolist():
+        vv = v.strip()
+        if vv and vv not in matched_names:
+            matched_names.append(vv)
+    unmatched_names = []
+    for v in rows_df.loc[rows_df["matched"] != True, "input_company"].dropna().astype(str).tolist():  # noqa: E712
+        vv = v.strip()
+        if vv and vv not in unmatched_names:
+            unmatched_names.append(vv)
+
+    stage_brief = _build_value_chain_rows_brief_text(match_rows)
+    topic_queries = [
+        f"{chain_name} 업스트림 미드스트림 다운스트림 설명",
+        f"{chain_name} 수요 공급 가격 변수",
+        f"{chain_name} 관련 상장사 투자 포인트 리스크",
+    ]
+    google_context_text, google_note = fetch_google_topic_research_context(
+        topic=chain_name,
+        extra_queries=topic_queries,
+        max_items=12,
+    )
+
+    matched_text = ", ".join(matched_names[:40]) if matched_names else "없음"
+    unmatched_text = ", ".join(unmatched_names[:40]) if unmatched_names else "없음"
+    user_prompt = f"""
+주제: {chain_name}
+
+내 밸류체인 추출 결과:
+{stage_brief}
+
+내 관심기업 매칭:
+- 매칭됨: {matched_text}
+- 미매칭: {unmatched_text}
+
+구글 검색 발췌:
+{google_context_text or "검색 컨텍스트 없음"}
+
+요청:
+- 한국어 Markdown으로만 작성
+- 아래 섹션을 정확히 포함
+  1) 밸류체인 총 설명
+  2) 단계별 핵심 포인트(업스트림/미드스트림/다운스트림)
+  3) 가격/수요/원가/규제 민감도
+  4) 내 관심기업 포지셔닝(매칭된 기업 중심)
+  5) 체크해야 할 리스크와 데이터 포인트
+- 일반론보다 실제 산업 키워드/공정/제품명을 구체적으로 쓸 것
+- 확실하지 않은 내용은 '(확인필요)' 표기
+""".strip()
+
+    text, err = call_ai_text(
+        provider=provider,
+        api_key=key,
+        model=model,
+        system_prompt="너는 산업 밸류체인 분석 어시스턴트다. 사실 기반으로 한국어 Markdown을 작성한다.",
+        user_prompt=user_prompt,
+        temperature=0.2,
+        max_output_tokens=1400,
+        timeout_sec=35,
+    )
+    if err:
+        return "", f"밸류체인 설명 생성 실패: {err}", google_note
+    out = str(text or "").strip()
+    if not out:
+        return "", "밸류체인 설명 생성 결과가 비어 있습니다.", google_note
+    return out, "", google_note
+
+
+def _analysis_preview_lines(text: str, limit: int = 5) -> list[str]:
+    lines = _split_report_lines(text)
+    if not lines:
+        raw = str(text or "").strip()
+        return [raw] if raw else []
+    return lines[: max(1, int(limit))]
+
+
+def _render_value_chain_company_detail(
+    input_company: str,
+    matched_company: str,
+    company_list_df: pd.DataFrame,
+    latest_analysis_map: dict[str, dict],
+) -> None:
+    input_name = str(input_company or "").strip()
+    matched_name = str(matched_company or "").strip()
+    target_name = matched_name or input_name
+    st.markdown(f"**기업명:** {target_name or '-'}")
+    if input_name and matched_name and input_name != matched_name:
+        st.caption(f"이미지 추출명: {input_name}")
+
+    cl_df = company_list_df if isinstance(company_list_df, pd.DataFrame) else pd.DataFrame()
+    company_row = None
+    if not cl_df.empty and target_name:
+        picked = cl_df[cl_df["stock_name"].astype(str) == target_name]
+        if not picked.empty:
+            company_row = picked.iloc[0]
+
+    if company_row is not None:
+        ticker = clean_valid_ticker(str(company_row.get("ticker") or ""))
+        sector = str(company_row.get("sector") or "").strip()
+        price_krw = _safe_to_float(company_row.get("price_krw"))
+        price_source = str(company_row.get("price_source") or "").strip()
+        created_at = str(company_row.get("created_at") or "").strip()
+        updated_at = str(company_row.get("updated_at") or "").strip()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption(f"티커: {ticker or '-'}")
+            st.caption(f"산업섹터: {sector or '-'}")
+            st.caption(f"리스트소스: {str(company_row.get('source') or '-').strip() or '-'}")
+        with c2:
+            if price_krw is not None and price_krw > 0:
+                st.caption(f"현재주가(원화환산): {price_krw:,.0f}원")
+            else:
+                st.caption("현재주가(원화환산): -")
+            st.caption(f"주가소스: {price_source or '-'}")
+            st.caption(f"등록/수정: {created_at or '-'} / {updated_at or '-'}")
+    else:
+        st.caption("기업정보 리스트에서 상세 정보를 찾지 못했습니다.")
+
+    latest = latest_analysis_map.get(target_name) if target_name else None
+    if not isinstance(latest, dict):
+        st.caption("저장된 기업분석 이력이 없습니다.")
+        return
+
+    st.markdown("---")
+    st.caption(
+        "최근 기업분석: "
+        f"{str(latest.get('analysis_date') or '-')} / "
+        f"티커 {str(latest.get('ticker') or '-')} / "
+        f"소스 {str(latest.get('source') or '-')}"
+    )
+
+    overview_lines = _analysis_preview_lines(str(latest.get("company_overview") or ""), limit=4)
+    if overview_lines:
+        st.markdown("**기업 개요**")
+        for ln in overview_lines:
+            st.write(f"- {ln}")
+
+    product_lines = _analysis_preview_lines(str(latest.get("products_services") or ""), limit=5)
+    if product_lines:
+        st.markdown("**핵심 제품/서비스**")
+        for ln in product_lines:
+            st.write(f"- {ln}")
+
+    raw_lines = _analysis_preview_lines(str(latest.get("raw_materials") or ""), limit=4)
+    if raw_lines:
+        st.markdown("**핵심 원재료/투입요소**")
+        for ln in raw_lines:
+            st.write(f"- {ln}")
+
+    fs = parse_financial_summary_json(latest.get("financial_summary_json"))
+    if isinstance(fs, dict) and fs:
+        st.markdown("**핵심 재무 요약**")
+        st.caption(
+            f"시가총액 {_fmt_num_brief(fs.get('market_cap'))} / "
+            f"매출 {_fmt_num_brief(fs.get('total_revenue'))} / "
+            f"ROE {_fmt_pct_brief(fs.get('roe_pct'))}"
+        )
+
+
 def fetch_company_metrics_from_yfinance(ticker: str) -> tuple[dict, str, str]:
     tkr = clean_valid_ticker(ticker)
     if not tkr:
@@ -4465,6 +5067,65 @@ def fetch_google_company_research_context(
         )
     context_text = "\n".join(context_lines)
     return context_text, f"google_web ({len(context_lines)}건)"
+
+
+def fetch_google_topic_research_context(
+    topic: str,
+    extra_queries: list[str] | None = None,
+    max_items: int = 10,
+) -> tuple[str, str]:
+    topic_text = str(topic or "").strip()
+    if not topic_text:
+        return "", "구글 검색 컨텍스트 생성 실패: 주제가 비어 있습니다."
+
+    queries = [
+        f"{topic_text} value chain upstream midstream downstream",
+        f"{topic_text} industry structure demand supply price driver",
+        f"{topic_text} 주요 기업 경쟁구도 투자 포인트 리스크",
+    ]
+    for q in (extra_queries or []):
+        qq = str(q or "").strip()
+        if qq:
+            queries.append(qq)
+
+    all_rows: list[dict] = []
+    errs: list[str] = []
+    for q in queries:
+        url = f"https://r.jina.ai/http://www.google.com/search?q={quote_plus(q)}&hl=ko&num=8"
+        try:
+            resp = requests.get(
+                url,
+                headers={**HTTP_HEADERS_COMMON, "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"},
+                timeout=18,
+            )
+            resp.raise_for_status()
+            all_rows.extend(_parse_google_search_markdown_results(resp.text, limit=12))
+        except Exception as exc:
+            errs.append(str(exc))
+
+    deduped: list[dict] = []
+    seen_urls: set[str] = set()
+    for row in all_rows:
+        url_key = _normalize_research_url(row.get("url"))
+        if not url_key or url_key in seen_urls:
+            continue
+        seen_urls.add(url_key)
+        deduped.append(row)
+
+    if not deduped:
+        msg = "구글 검색 결과를 확보하지 못했습니다."
+        if errs:
+            msg = f"{msg} ({'; '.join(errs[:2])})"
+        return "", msg
+
+    lines = []
+    for idx, row in enumerate(deduped[: max(1, int(max_items))], start=1):
+        title = str(row.get("title") or "").strip()
+        snippet = re.sub(r"\s+", " ", str(row.get("snippet") or "").strip())[:360]
+        domain = str(row.get("domain") or "").strip()
+        url = str(row.get("url") or "").strip()
+        lines.append(f"{idx}. title={title} | snippet={snippet} | source={domain} | url={url}")
+    return "\n".join(lines), f"google_web ({len(lines)}건)"
 
 
 def _is_missing_summary_value(value) -> bool:
@@ -7794,15 +8455,22 @@ def add_line_labels(fig, pct: bool = False, last_only: bool = False, max_labels:
     return fig
 
 
-def estimate_textarea_height(value, min_height: int = 100, max_height: int = 1400) -> int:
+def estimate_textarea_height(
+    value,
+    min_height: int = 90,
+    max_height: int = 640,
+    chars_per_line: int = 60,
+) -> int:
     text = str(value or "")
     lines = text.splitlines() or [""]
     virtual_lines = 0
     for line in lines:
-        line_len = len(str(line))
-        # 한 줄이 길면 실제 렌더에서 줄바꿈되므로 더 보수적으로(큰 높이) 계산한다.
-        virtual_lines += max(1, (line_len // 28) + 1)
-    height = 56 + virtual_lines * 28
+        line_text = str(line or "")
+        cjk_bonus = int(len(re.findall(r"[가-힣\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF]", line_text)) * 0.45)
+        visual_len = len(line_text) + cjk_bonus
+        wrapped = max(1, (visual_len + max(1, chars_per_line) - 1) // max(1, chars_per_line))
+        virtual_lines += wrapped
+    height = 44 + virtual_lines * 22
     return int(max(min_height, min(max_height, height)))
 
 
@@ -9597,6 +10265,10 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.success(st.session_state.pop("analysis_bulk_selected_save_notice"))
     if "analysis_bulk_selected_save_warning" in st.session_state:
         st.warning(st.session_state.pop("analysis_bulk_selected_save_warning"))
+    if "analysis_bulk_selected_delete_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_bulk_selected_delete_notice"))
+    if "analysis_bulk_selected_delete_warning" in st.session_state:
+        st.warning(st.session_state.pop("analysis_bulk_selected_delete_warning"))
 
     if overview_rows:
         st.caption("목록에서 기업 행을 선택하면 아래 기업명/티커 입력이 자동 선택됩니다.")
@@ -9664,7 +10336,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         selected_names = list(dict.fromkeys(selected_names))
         st.session_state["analysis_selected_overview_names"] = selected_names
 
-        sel_col1, sel_col2, sel_col3 = st.columns([1.25, 1.05, 1.5])
+        sel_col1, sel_col2, sel_col3, sel_col4 = st.columns([1.1, 1.0, 0.95, 1.45])
         with sel_col1:
             reset_selected_btn = st.button(
                 "선택 항목 초기화 후 재탐색 (API+AI)",
@@ -9676,6 +10348,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 key="analysis_save_selected_company_meta_btn",
             )
         with sel_col3:
+            delete_selected_btn = st.button(
+                "선택 관심목록 삭제",
+                key="analysis_delete_selected_company_list_btn",
+            )
+        with sel_col4:
             st.caption(f"현재 선택: {len(selected_names):,}개")
 
         if reset_selected_btn:
@@ -9747,6 +10424,40 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     st.session_state["analysis_bulk_selected_save_warning"] = (
                         f"티커/섹터가 비어 저장하지 못한 항목: {preview}{tail}"
                     )
+                st.rerun()
+
+        if delete_selected_btn:
+            if not selected_names:
+                st.warning("먼저 표에서 기업을 1개 이상 체크해 주세요.")
+            else:
+                deleted_count = 0
+                skipped_non_watch: list[str] = []
+                for name in selected_names:
+                    nm = str(name or "").strip()
+                    if not nm:
+                        continue
+                    if nm not in listed_set:
+                        skipped_non_watch.append(nm)
+                        continue
+                    delete_company_list_entry(nm)
+                    deleted_count += 1
+                    if (st.session_state.get("analysis_company_name_input") or "").strip() == nm:
+                        st.session_state["analysis_company_name_pending"] = ""
+                        st.session_state["analysis_ticker_pending"] = ""
+
+                if deleted_count > 0:
+                    st.session_state["analysis_bulk_selected_delete_notice"] = (
+                        f"선택 관심목록 삭제 완료: {deleted_count}개"
+                    )
+                if skipped_non_watch:
+                    preview = ", ".join(skipped_non_watch[:6])
+                    remain = len(skipped_non_watch) - min(6, len(skipped_non_watch))
+                    tail = f" 외 {remain}개" if remain > 0 else ""
+                    st.session_state["analysis_bulk_selected_delete_warning"] = (
+                        f"보유종목만 존재해 관심목록 삭제를 건너뜀: {preview}{tail}"
+                    )
+                if deleted_count == 0 and not skipped_non_watch:
+                    st.session_state["analysis_bulk_selected_delete_warning"] = "삭제 가능한 관심목록 항목이 없습니다."
                 st.rerun()
 
         if selected_rows:
@@ -10096,32 +10807,62 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     st.text_area(
         "기업 개요",
         key="analysis_company_overview",
-        height=estimate_textarea_height(st.session_state.get("analysis_company_overview", ""), min_height=130),
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_company_overview", ""),
+            min_height=96,
+            max_height=340,
+            chars_per_line=62,
+        ),
     )
     st.text_area(
         "핵심 제품/서비스·돈 버는 방식",
         key="analysis_products_services",
-        height=estimate_textarea_height(st.session_state.get("analysis_products_services", ""), min_height=120),
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_products_services", ""),
+            min_height=96,
+            max_height=420,
+            chars_per_line=62,
+        ),
     )
     st.text_area(
         "핵심 원재료/투입요소",
         key="analysis_raw_materials",
-        height=estimate_textarea_height(st.session_state.get("analysis_raw_materials", ""), min_height=120),
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_raw_materials", ""),
+            min_height=96,
+            max_height=380,
+            chars_per_line=62,
+        ),
     )
     st.text_area(
         "이익 증가 요인·좋은 변화(촉매)",
         key="analysis_profit_up_factors",
-        height=estimate_textarea_height(st.session_state.get("analysis_profit_up_factors", ""), min_height=140),
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_profit_up_factors", ""),
+            min_height=96,
+            max_height=430,
+            chars_per_line=62,
+        ),
     )
     st.text_area(
         "이익 감소 요인(리스크)",
         key="analysis_profit_down_factors",
-        height=estimate_textarea_height(st.session_state.get("analysis_profit_down_factors", ""), min_height=140),
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_profit_down_factors", ""),
+            min_height=96,
+            max_height=430,
+            chars_per_line=62,
+        ),
     )
     st.text_area(
         "요약 메모",
         key="analysis_key_takeaway",
-        height=estimate_textarea_height(st.session_state.get("analysis_key_takeaway", ""), min_height=110),
+        height=estimate_textarea_height(
+            st.session_state.get("analysis_key_takeaway", ""),
+            min_height=90,
+            max_height=300,
+            chars_per_line=62,
+        ),
     )
 
     report_analysis = {
@@ -10373,6 +11114,233 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         height=estimate_dataframe_height(hist_view_df, min_height=220, max_height=2400),
         use_container_width=True,
         hide_index=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_value_chain_tab() -> None:
+    st.markdown('<div class="section-shell">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">밸류체인</div>', unsafe_allow_html=True)
+    st.caption(
+        "밸류체인 이미지를 올리면 단계/세부공정/기업명을 추출한 뒤 "
+        "관심기업(기업정보 리스트)과 자동 매칭해서 시각화합니다."
+    )
+
+    if "value_chain_uploader_nonce" not in st.session_state:
+        st.session_state["value_chain_uploader_nonce"] = 0
+    if "value_chain_result" not in st.session_state:
+        st.session_state["value_chain_result"] = {}
+    if "value_chain_notice" not in st.session_state:
+        st.session_state["value_chain_notice"] = ""
+    if "value_chain_warning" not in st.session_state:
+        st.session_state["value_chain_warning"] = ""
+    if "value_chain_summary_notice" not in st.session_state:
+        st.session_state["value_chain_summary_notice"] = ""
+    if "value_chain_summary_warning" not in st.session_state:
+        st.session_state["value_chain_summary_warning"] = ""
+
+    uploader_key = f"value_chain_image_uploader_{st.session_state['value_chain_uploader_nonce']}"
+    up_col, opt_col = st.columns([1.8, 1])
+    with up_col:
+        vc_file = st.file_uploader(
+            "밸류체인 이미지",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=uploader_key,
+        )
+    with opt_col:
+        show_only_matched = st.checkbox("관심기업 매칭 결과만 보기", value=False, key="value_chain_show_only_matched")
+        run_btn = st.button("이미지로 밸류체인 분석", type="primary", key="value_chain_run_btn")
+
+    if vc_file is not None:
+        st.image(vc_file, caption="업로드된 밸류체인 이미지", use_container_width=True)
+
+    if run_btn:
+        if vc_file is None:
+            st.warning("먼저 밸류체인 이미지를 업로드해 주세요.")
+        else:
+            ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+            with st.spinner("밸류체인 이미지에서 단계/기업을 추출하고 매칭 중입니다..."):
+                parsed, parse_err = extract_value_chain_from_image_with_ai(
+                    image_bytes=vc_file.getvalue(),
+                    mime_type=getattr(vc_file, "type", "image/png"),
+                    provider=ai_provider,
+                    api_key=ai_api_key,
+                    model=ai_model,
+                )
+                if parse_err:
+                    st.error(parse_err)
+                else:
+                    company_list_df = load_company_list()
+                    match_rows = _build_value_chain_match_rows(parsed, company_list_df)
+                    parsed["matched_rows"] = match_rows
+                    parsed["created_at"] = datetime.now().isoformat(timespec="seconds")
+                    parsed["overview_text"] = ""
+                    parsed["overview_source"] = ""
+                    st.session_state["value_chain_result"] = parsed
+                    st.session_state["value_chain_uploader_nonce"] += 1
+                    total_nodes = len(match_rows)
+                    matched_cnt = sum(1 for r in match_rows if bool(r.get("matched")))
+                    st.session_state["value_chain_notice"] = (
+                        f"밸류체인 분석 완료: 기업 {total_nodes}개 중 관심기업 매칭 {matched_cnt}개"
+                    )
+                    st.rerun()
+
+    if st.session_state.get("value_chain_notice"):
+        st.success(st.session_state.pop("value_chain_notice"))
+    if st.session_state.get("value_chain_warning"):
+        st.warning(st.session_state.pop("value_chain_warning"))
+    if st.session_state.get("value_chain_summary_notice"):
+        st.success(st.session_state.pop("value_chain_summary_notice"))
+    if st.session_state.get("value_chain_summary_warning"):
+        st.warning(st.session_state.pop("value_chain_summary_warning"))
+
+    result = st.session_state.get("value_chain_result") if isinstance(st.session_state.get("value_chain_result"), dict) else {}
+    if not result or not result.get("rows"):
+        st.info("아직 밸류체인 결과가 없습니다. 이미지를 업로드해 분석해 주세요.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    chain_name = str(result.get("chain_name") or "밸류체인").strip()
+    match_rows = result.get("matched_rows") if isinstance(result.get("matched_rows"), list) else []
+    if not match_rows:
+        company_list_df = load_company_list()
+        match_rows = _build_value_chain_match_rows(result, company_list_df)
+        result["matched_rows"] = match_rows
+        st.session_state["value_chain_result"] = result
+
+    df = pd.DataFrame(match_rows)
+    if df.empty:
+        st.warning("밸류체인 결과를 표시할 행이 없습니다.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    if bool(show_only_matched):
+        view_df = df[df["matched"] == True].copy()  # noqa: E712
+    else:
+        view_df = df.copy()
+
+    total_count = len(df)
+    matched_count = int(df["matched"].sum()) if "matched" in df.columns else 0
+    unmatched_count = max(0, total_count - matched_count)
+    stage_count = len(df["stage"].dropna().unique())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("체인명", chain_name)
+    m2.metric("체인 기업수", f"{total_count:,}")
+    m3.metric("관심기업 매칭", f"{matched_count:,}")
+    m4.metric("미매칭", f"{unmatched_count:,}")
+    st.caption(f"단계 수: {stage_count} / 생성시각: {str(result.get('created_at') or '-')}")
+
+    summary_col1, summary_col2 = st.columns([1, 1.8])
+    with summary_col1:
+        make_summary_btn = st.button("밸류체인 총 설명 생성 (AI+검색)", key="value_chain_make_summary_btn")
+    with summary_col2:
+        overview_source = str(result.get("overview_source") or "").strip()
+        if overview_source:
+            st.caption(f"설명 생성 검색소스: {overview_source}")
+
+    if make_summary_btn:
+        ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+        with st.spinner("구글 검색 기반으로 밸류체인 총 설명을 생성 중입니다..."):
+            summary_text, summary_err, summary_source = generate_value_chain_overview_with_ai(
+                chain_name=chain_name,
+                match_rows=df.to_dict("records"),
+                provider=ai_provider,
+                api_key=ai_api_key,
+                model=ai_model,
+            )
+            if summary_err:
+                st.session_state["value_chain_summary_warning"] = summary_err
+            else:
+                result["overview_text"] = summary_text
+                result["overview_source"] = summary_source
+                st.session_state["value_chain_result"] = result
+                st.session_state["value_chain_summary_notice"] = "밸류체인 총 설명 생성을 완료했습니다."
+        st.rerun()
+
+    overview_text = str(result.get("overview_text") or "").strip()
+    if overview_text:
+        st.markdown("#### 밸류체인 총 설명")
+        st.markdown(overview_text)
+
+    stage_order = ["업스트림", "미드스트림", "다운스트림"]
+    view_df["stage_order"] = view_df["stage"].apply(lambda x: stage_order.index(x) if x in stage_order else 99)
+    view_df = view_df.sort_values(["stage_order", "segment", "input_company"]).copy()
+
+    company_list_df = load_company_list()
+    analysis_all_df = load_company_analysis_history()
+    latest_analysis_map: dict[str, dict] = {}
+    if isinstance(analysis_all_df, pd.DataFrame) and not analysis_all_df.empty:
+        tmp = analysis_all_df.copy()
+        tmp["analysis_date"] = pd.to_datetime(tmp["analysis_date"], errors="coerce")
+        tmp = tmp.sort_values(["analysis_date", "updated_at"], ascending=[False, False])
+        for _, row in tmp.iterrows():
+            nm = str(row.get("stock_name") or "").strip()
+            if not nm or nm in latest_analysis_map:
+                continue
+            latest_analysis_map[nm] = row.to_dict()
+
+    popover_seq = 0
+    for stage_name in list(dict.fromkeys(view_df["stage"].tolist())):
+        stage_df = view_df[view_df["stage"] == stage_name].copy()
+        if stage_df.empty:
+            continue
+        st.markdown(f"#### {stage_name}")
+        segments = stage_df["segment"].dropna().astype(str).unique().tolist()
+        cols = st.columns(max(1, min(4, len(segments))))
+        for idx, seg in enumerate(segments):
+            seg_df = stage_df[stage_df["segment"] == seg].copy()
+            with cols[idx % len(cols)]:
+                st.markdown(f"**{seg}**")
+                for _, rr in seg_df.iterrows():
+                    popover_seq += 1
+                    in_name = str(rr.get("input_company") or "").strip()
+                    m_name = str(rr.get("matched_company") or "").strip()
+                    matched = bool(rr.get("matched"))
+                    if matched:
+                        head_text = f"매칭 | {in_name} -> {m_name}"
+                    else:
+                        head_text = f"미매칭 | {in_name}"
+                    st.caption(head_text)
+                    with st.popover(f"{in_name or '기업'} 상세보기 ({popover_seq})"):
+                        _render_value_chain_company_detail(
+                            input_company=in_name,
+                            matched_company=m_name,
+                            company_list_df=company_list_df,
+                            latest_analysis_map=latest_analysis_map,
+                        )
+
+    sankey_fig = _build_value_chain_sankey_figure(view_df.to_dict("records"), chain_name)
+    if sankey_fig is not None:
+        st.plotly_chart(style_figure(sankey_fig), use_container_width=True)
+
+    out_df = view_df.rename(
+        columns={
+            "stage": "단계",
+            "segment": "세부공정",
+            "input_company": "이미지기업명",
+            "matched_company": "매칭기업명",
+            "matched": "매칭여부",
+            "match_score": "매칭점수",
+            "ticker": "티커",
+            "sector": "산업섹터",
+        }
+    )
+    out_df["매칭점수"] = pd.to_numeric(out_df["매칭점수"], errors="coerce").round(3)
+    st.markdown("#### 매칭 상세")
+    st.dataframe(
+        out_df[["단계", "세부공정", "이미지기업명", "매칭기업명", "티커", "산업섹터", "매칭여부", "매칭점수"]],
+        height=estimate_dataframe_height(out_df, min_height=240, max_height=1200),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    result_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
+    st.download_button(
+        "밸류체인 결과 JSON 다운로드",
+        data=result_bytes,
+        file_name=f"value_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json",
+        key="value_chain_download_json_btn",
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -12023,7 +12991,7 @@ def main() -> None:
         st.session_state["github_sync_notice"] = f"내장 티커 자동 교정 완료: {corrected_builtin_global}개"
         st.rerun()
 
-    tab_options = ["대시보드", "기록 입력", "환율", "기업정보", "기업분석", "기업 점수", "API 설정"]
+    tab_options = ["대시보드", "기록 입력", "환율", "기업정보", "기업분석", "밸류체인", "기업 점수", "API 설정"]
     if "active_main_tab" not in st.session_state:
         st.session_state["active_main_tab"] = "대시보드"
     if st.session_state.get("active_main_tab") not in tab_options:
@@ -12047,6 +13015,8 @@ def main() -> None:
         render_company_analysis_tab(st.session_state["editing_df"])
     elif active_tab == "기업분석":
         render_company_compare_tab(st.session_state["editing_df"])
+    elif active_tab == "밸류체인":
+        render_value_chain_tab()
     elif active_tab == "기업 점수":
         render_company_score_tab(st.session_state["editing_df"])
     elif active_tab == "API 설정":
