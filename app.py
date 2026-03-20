@@ -549,7 +549,6 @@ def inject_styles() -> None:
         """
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@100..900&display=swap');
-            @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
 
             :root {
                 --ink: #0f172a;
@@ -568,10 +567,6 @@ def inject_styles() -> None:
                     radial-gradient(1200px 480px at -10% -25%, #dbeafe 0%, rgba(219, 234, 254, 0) 70%),
                     radial-gradient(1000px 420px at 110% -15%, #ccfbf1 0%, rgba(204, 251, 241, 0) 70%),
                     linear-gradient(180deg, #f8fafc 0%, #edf2f7 55%, #f8fafc 100%);
-            }
-
-            .stApp *:not([class*="material-symbols"]) {
-                font-family: 'Noto Sans KR', sans-serif;
             }
 
             .block-container {
