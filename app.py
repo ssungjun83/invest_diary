@@ -3681,73 +3681,18 @@ def extract_holdings_from_image_with_ai(
 - 설명 문장 없이 JSON만
 """.strip()
 
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    try:
-        if normalized_provider == "claude":
-            body = {
-                "model": selected_model,
-                "max_tokens": 2200,
-                "temperature": 0.0,
-                "system": system_prompt,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {"type": "base64", "media_type": media_type, "data": image_b64},
-                            },
-                            {"type": "text", "text": user_prompt},
-                        ],
-                    }
-                ],
-            }
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=35,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            pieces = []
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    pieces.append(str(block.get("text", "")))
-            text = "\n".join([p for p in pieces if p]).strip()
-        else:
-            data_url = f"data:{media_type};base64,{image_b64}"
-            body = {
-                "model": selected_model,
-                "input": [
-                    {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": user_prompt},
-                            {"type": "input_image", "image_url": data_url},
-                        ],
-                    },
-                ],
-                "temperature": 0.0,
-                "max_output_tokens": 2200,
-            }
-            resp = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json=body,
-                timeout=35,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = _extract_openai_output_text(data)
-    except Exception as exc:
-        return {}, f"{ai_provider_label(normalized_provider)} 이미지 분석 실패: {exc}"
+    text, run_err = _run_multimodal_ai_text(
+        provider=normalized_provider,
+        api_key=key,
+        model=selected_model,
+        image_bytes=image_bytes,
+        mime_type=media_type,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_output_tokens=2200,
+    )
+    if run_err:
+        return {}, run_err
 
     if not text:
         return {}, "AI 응답이 비어 있습니다."
@@ -3806,73 +3751,18 @@ def extract_company_watchlist_from_image_with_ai(
 - 설명 문장 없이 JSON만
 """.strip()
 
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    try:
-        if normalized_provider == "claude":
-            body = {
-                "model": selected_model,
-                "max_tokens": 2000,
-                "temperature": 0.0,
-                "system": system_prompt,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {"type": "base64", "media_type": media_type, "data": image_b64},
-                            },
-                            {"type": "text", "text": user_prompt},
-                        ],
-                    }
-                ],
-            }
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=35,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            pieces = []
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    pieces.append(str(block.get("text", "")))
-            text = "\n".join([p for p in pieces if p]).strip()
-        else:
-            data_url = f"data:{media_type};base64,{image_b64}"
-            body = {
-                "model": selected_model,
-                "input": [
-                    {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": user_prompt},
-                            {"type": "input_image", "image_url": data_url},
-                        ],
-                    },
-                ],
-                "temperature": 0.0,
-                "max_output_tokens": 2000,
-            }
-            resp = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json=body,
-                timeout=35,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = _extract_openai_output_text(data)
-    except Exception as exc:
-        return [], f"{ai_provider_label(normalized_provider)} 이미지 분석 실패: {exc}"
+    text, run_err = _run_multimodal_ai_text(
+        provider=normalized_provider,
+        api_key=key,
+        model=selected_model,
+        image_bytes=image_bytes,
+        mime_type=media_type,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_output_tokens=2000,
+    )
+    if run_err:
+        return [], run_err
 
     if not text:
         return [], "AI 응답이 비어 있습니다."
@@ -4086,72 +3976,18 @@ def extract_value_chain_from_image_with_ai(
 - 설명문 없이 JSON만 출력
 """.strip()
 
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    try:
-        if normalized_provider == "claude":
-            body = {
-                "model": selected_model,
-                "max_tokens": 2200,
-                "temperature": 0.0,
-                "system": system_prompt,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {"type": "base64", "media_type": media_type, "data": image_b64},
-                            },
-                            {"type": "text", "text": user_prompt},
-                        ],
-                    }
-                ],
-            }
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=35,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            pieces = []
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    pieces.append(str(block.get("text", "")))
-            text = "\n".join([p for p in pieces if p]).strip()
-        else:
-            data_url = f"data:{media_type};base64,{image_b64}"
-            body = {
-                "model": selected_model,
-                "input": [
-                    {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": user_prompt},
-                            {"type": "input_image", "image_url": data_url},
-                        ],
-                    },
-                ],
-                "temperature": 0.0,
-                "max_output_tokens": 2200,
-            }
-            resp = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json=body,
-                timeout=35,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = _extract_openai_output_text(data)
-    except Exception as exc:
-        return {}, f"{ai_provider_label(normalized_provider)} 이미지 분석 실패: {exc}"
+    text, run_err = _run_multimodal_ai_text(
+        provider=normalized_provider,
+        api_key=key,
+        model=selected_model,
+        image_bytes=image_bytes,
+        mime_type=media_type,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_output_tokens=2200,
+    )
+    if run_err:
+        return {}, run_err
 
     if not text:
         return {}, "AI 응답이 비어 있습니다."
@@ -7539,6 +7375,140 @@ def get_market_data_api_keys() -> tuple[str, str]:
     except Exception:
         return "", ""
     return alpha_key, finnhub_key
+
+
+def _short_http_error_detail(exc: Exception) -> str:
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return str(exc)
+    detail = ""
+    try:
+        detail = str(resp.text or "").strip()
+    except Exception:
+        detail = ""
+    if detail:
+        detail = re.sub(r"\s+", " ", detail)
+        if len(detail) > 400:
+            detail = detail[:400].rstrip() + "..."
+        return f"HTTP {resp.status_code}: {detail}"
+    return str(exc)
+
+
+def _extract_claude_text_from_response(data: dict) -> str:
+    pieces = []
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            pieces.append(str(block.get("text", "")))
+    return "\n".join([p for p in pieces if p]).strip()
+
+
+def _run_multimodal_ai_text(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+    image_bytes: bytes,
+    mime_type: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_output_tokens: int = 2200,
+) -> tuple[str, str]:
+    normalized_provider = normalize_ai_provider(provider)
+    key = str(api_key or "").strip()
+    if not key:
+        return "", f"{ai_provider_label(normalized_provider)} API 키가 비어 있습니다."
+    if not image_bytes:
+        return "", "이미지 데이터가 비어 있습니다."
+
+    media_type = str(mime_type or "image/png").strip().lower()
+    if not media_type.startswith("image/"):
+        media_type = "image/png"
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    if normalized_provider == "claude":
+        model_candidates = []
+        selected_model = str(model or "").strip()
+        if selected_model:
+            model_candidates.append(selected_model)
+        default_model = str(DEFAULT_CLAUDE_MODEL or "").strip()
+        if default_model and default_model not in model_candidates:
+            model_candidates.append(default_model)
+
+        errors = []
+        for candidate_model in model_candidates:
+            body = {
+                "model": candidate_model,
+                "max_tokens": int(max_output_tokens),
+                "temperature": 0.0,
+                "system": system_prompt,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": media_type, "data": image_b64},
+                            },
+                            {"type": "text", "text": user_prompt},
+                        ],
+                    }
+                ],
+            }
+            try:
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": key,
+                        "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                    timeout=35,
+                )
+                resp.raise_for_status()
+                return _extract_claude_text_from_response(resp.json() or {}), ""
+            except Exception as exc:
+                errors.append(f"{candidate_model}: {_short_http_error_detail(exc)}")
+        return "", f"Claude 이미지 분석 실패: {' | '.join(errors)}"
+
+    model_candidates = []
+    selected_model = str(model or "").strip()
+    if selected_model:
+        model_candidates.append(selected_model)
+    default_model = str(DEFAULT_OPENAI_MODEL or "").strip()
+    if default_model and default_model not in model_candidates:
+        model_candidates.append(default_model)
+
+    errors = []
+    data_url = f"data:{media_type};base64,{image_b64}"
+    for candidate_model in model_candidates:
+        body = {
+            "model": candidate_model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_prompt},
+                        {"type": "input_image", "image_url": data_url},
+                    ],
+                },
+            ],
+            "temperature": 0.0,
+            "max_output_tokens": int(max_output_tokens),
+        }
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/responses",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body,
+                timeout=35,
+            )
+            resp.raise_for_status()
+            return _extract_openai_output_text(resp.json() or {}), ""
+        except Exception as exc:
+            errors.append(f"{candidate_model}: {_short_http_error_detail(exc)}")
+    return "", f"OpenAI 이미지 분석 실패: {' | '.join(errors)}"
 
 
 def _to_bool_flag(value) -> bool:
