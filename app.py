@@ -13627,7 +13627,7 @@ def main() -> None:
         st.session_state["github_sync_notice"] = f"내장 티커 자동 교정 완료: {corrected_builtin_global}개"
         st.rerun()
 
-    tab_options = ["대시보드", "기록 입력", "환율", "기업정보", "밸류체인", "기업분석", "기업 점수", "API 설정"]
+    tab_options = ["대시보드", "보유종목", "환율", "관심기업", "밸류체인", "기업분석", "기업점수", "API설정"]
     if "active_main_tab" not in st.session_state:
         st.session_state["active_main_tab"] = "대시보드"
     if st.session_state.get("active_main_tab") not in tab_options:
@@ -13643,19 +13643,19 @@ def main() -> None:
 
     if active_tab == "대시보드":
         render_dashboard(st.session_state["editing_df"], usd_krw_rate, selected_date)
-    elif active_tab == "기록 입력":
+    elif active_tab == "보유종목":
         st.session_state["editing_df"] = render_input_tab(selected_date, st.session_state["editing_df"], usd_krw_rate)
     elif active_tab == "환율":
         render_fx_tab()
-    elif active_tab == "기업정보":
+    elif active_tab == "관심기업":
         render_company_analysis_tab(st.session_state["editing_df"])
     elif active_tab == "밸류체인":
         render_value_chain_tab()
     elif active_tab == "기업분석":
         render_company_compare_tab(st.session_state["editing_df"])
-    elif active_tab == "기업 점수":
+    elif active_tab == "기업점수":
         render_company_score_tab(st.session_state["editing_df"])
-    elif active_tab == "API 설정":
+    elif active_tab == "API설정":
         render_api_settings_tab()
 
 
