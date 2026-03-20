@@ -8439,8 +8439,6 @@ def _refresh_company_prices_for_portfolio(
 def run_daily_auto_snapshot(force: bool = False, target_date: date | None = None) -> tuple[bool, str]:
     run_date = target_date or date.today()
     run_date_text = run_date.isoformat()
-    base_date = run_date - timedelta(days=1)
-    base_date_text = base_date.isoformat()
 
     enabled = bool(st.session_state.get("daily_auto_snapshot_enabled", False))
     if not enabled and not force:
@@ -8472,9 +8470,18 @@ def run_daily_auto_snapshot(force: bool = False, target_date: date | None = None
         pass
 
     usd_krw_rate, _ = get_usd_krw_rate_for_date(run_date)
-    base_df = ensure_portfolio_columns(load_snapshot(base_date), usd_krw_rate, force_usd_rate=True)
+    source_date = run_date
+    source_date_text = run_date_text
+    base_df = ensure_portfolio_columns(load_snapshot(run_date), usd_krw_rate, force_usd_rate=True)
     if base_df.empty:
-        fail_msg = "일일 자동 저장 실패: 전일 기준 보유 자산 데이터가 없어 스냅샷을 생성하지 못했습니다."
+        latest_date_text, latest_df = load_latest_snapshot()
+        if latest_df is not None and not latest_df.empty:
+            parsed_latest_date = _safe_parse_date(latest_date_text) or run_date
+            source_date = parsed_latest_date
+            source_date_text = parsed_latest_date.isoformat()
+            base_df = ensure_portfolio_columns(latest_df, usd_krw_rate, force_usd_rate=True)
+    if base_df.empty:
+        fail_msg = "일일 자동 저장 실패: 기준이 될 보유종목 데이터가 없어 스냅샷을 생성하지 못했습니다."
         st.session_state["daily_auto_snapshot_last_summary"] = fail_msg
         save_app_settings_partial({"daily_auto_snapshot_last_summary": fail_msg})
         return False, fail_msg
@@ -8502,15 +8509,15 @@ def run_daily_auto_snapshot(force: bool = False, target_date: date | None = None
         )
         final_df = ensure_numeric(final_df, usd_krw_rate)
 
-        # 자동 실행은 전일 예수금을 그대로 승계한다.
-        base_cash_krw, base_cash_usd = load_snapshot_cash(base_date)
+        # 자동 실행은 기준 보유종목 스냅샷의 예수금을 그대로 승계한다.
+        base_cash_krw, base_cash_usd = load_snapshot_cash(source_date)
         save_snapshot_cash(run_date, base_cash_krw, base_cash_usd)
 
         sync_ok, sync_msg = save_snapshot(
             snapshot_date=run_date,
             df=final_df,
             sync_to_github=True,
-            sync_reason="daily_auto",
+            sync_reason="daily_auto_price_refresh",
         )
 
         view_krw = to_krw_view(final_df, usd_krw_rate, force_usd_rate=True)
@@ -8524,7 +8531,7 @@ def run_daily_auto_snapshot(force: bool = False, target_date: date | None = None
             sync_note = f" / GitHub {'완료' if sync_ok else '경고'}: {sync_msg}"
         summary = (
             f"일일 자동 저장 완료({run_date_text}) "
-            f"[기준: {base_date_text} 보유/예수금] "
+            f"[기준: {source_date_text} 보유종목/예수금] "
             f"- 총자산 {total_asset_krw:,.0f}원, 총손익 {stock_pnl_krw:,.0f}원, "
             f"주가갱신 {updated_price_count}개, 티커보강 {resolved_ticker_count}개"
             f"{sync_note}"
@@ -13786,7 +13793,7 @@ def render_api_settings_tab() -> None:
     st.checkbox(
         "하루 1회 자동 실행 사용",
         key="daily_auto_snapshot_enabled",
-        help="기준 시각 이후 첫 실행에서 전일 보유/예수금을 기준으로 주가 갱신→재계산→오늘 스냅샷 저장을 수행합니다.",
+        help="기준 시각 이후 첫 실행에서 최신 보유종목 기준으로 현재 주가를 다시 불러오고 오늘 스냅샷을 저장합니다.",
     )
     st.number_input(
         "자동 실행 기준 시각(한국시간, 시)",
@@ -13798,11 +13805,11 @@ def render_api_settings_tab() -> None:
     st.checkbox(
         "티커 비어있을 때 AI 티커 보강 사용",
         key="daily_auto_snapshot_use_ai_ticker",
-        help="자동 실행 시 티커가 없는 종목만 AI/API 경로로 티커를 보강합니다.",
+        help="자동 실행 시 티커가 없는 보유종목만 AI/API 경로로 티커를 보강합니다.",
     )
     st.caption(
-        "자동 실행 기준: 전일(어제) 스냅샷의 보유종목/예수금을 고정으로 가져와, "
-        "당일 주가만 갱신해 총자산/총손익을 재계산 후 저장합니다."
+        "자동 실행 기준: 오늘 스냅샷이 있으면 그 보유종목, 없으면 가장 최근 스냅샷의 보유종목을 기준으로 "
+        "현재 주가를 다시 불러와 총자산/총손익을 재계산 후 저장합니다."
     )
     st.caption(
         "주의: Streamlit 앱은 요청이 있을 때 실행됩니다. "
