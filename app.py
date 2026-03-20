@@ -10542,7 +10542,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         )
     with meta_btn_col3:
         refresh_price_btn = st.button(
-            "현재 주가 일괄 불러오기 + DB저장 (API+AI)",
+            "보유종목 현재 주가 불러오기 + DB저장 (API+AI)",
             key="analysis_fill_company_price_btn",
         )
 
@@ -10605,13 +10605,25 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
     if refresh_price_btn:
         ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
-        targets = [row for row in overview_rows if str(row.get("기업명") or "").strip()]
+        holding_names = (
+            current_df[COL_NAME].dropna().astype(str).str.strip().replace({"": pd.NA}).dropna().drop_duplicates().tolist()
+            if isinstance(current_df, pd.DataFrame) and not current_df.empty and COL_NAME in current_df.columns
+            else []
+        )
+        targets = []
+        if holding_names:
+            holding_name_set = set(holding_names)
+            targets = [
+                row
+                for row in overview_rows
+                if str(row.get("기업명") or "").strip() in holding_name_set
+            ]
         if not targets:
-            st.info("주가를 갱신할 기업이 없습니다.")
+            st.info("현재 보유종목 중 주가를 갱신할 기업이 없습니다.")
         else:
             updated_count = 0
             failed_details: list[str] = []
-            with st.spinner("기업 리스트 현재 주가를 일괄 불러오는 중입니다..."):
+            with st.spinner("보유종목 현재 주가를 불러오는 중입니다..."):
                 for row in targets:
                     company_name = str(row.get("기업명") or "").strip()
                     current_ticker = clean_valid_ticker(str(row.get("티커") or ""))
