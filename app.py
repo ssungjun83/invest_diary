@@ -11024,6 +11024,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 st.session_state["analysis_company_name_pending"] = selected
                 st.rerun()
 
+    st.markdown("</div>", unsafe_allow_html=True)
+    return
+
     analysis_company_name_value = (st.session_state.get("analysis_company_name_input") or "").strip()
     analysis_ticker_raw = _sanitize_widget_text(st.session_state.get("analysis_ticker_input"), "")
     analysis_ticker_value = clean_valid_ticker(analysis_ticker_raw)
