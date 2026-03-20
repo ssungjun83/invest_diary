@@ -7805,16 +7805,8 @@ def _load_github_settings_from_secrets() -> dict[str, str]:
 
 
 def _get_runtime_api_settings() -> dict[str, str]:
-    provider_direct, provider_direct_source = _read_first_secret_or_env_with_source(
-        ["AI_PROVIDER", "GLOBAL_AI_PROVIDER", "DEFAULT_AI_PROVIDER"]
-    )
-    provider_block, provider_block_source = _read_secret_block_value_with_source(
-        ["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"]
-    )
-    provider = normalize_ai_provider(
-        provider_direct or provider_block or st.session_state.get("global_ai_provider", "claude")
-    )
-    provider_source = provider_direct_source or provider_block_source or "session/db:global_ai_provider"
+    provider = normalize_ai_provider(st.session_state.get("global_ai_provider", "claude"))
+    provider_source = "session/db:global_ai_provider"
 
     openai_key_direct, openai_key_direct_source = _read_first_secret_or_env_with_source(
         ["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY", "CHATGPT_API_KEY", "GLOBAL_CHATGPT_API_KEY"]
@@ -7854,31 +7846,11 @@ def _get_runtime_api_settings() -> dict[str, str]:
     finnhub_key = finnhub_key_direct or finnhub_key_block or str(st.session_state.get("global_finnhub_api_key", "") or "").strip()
     finnhub_key_source = finnhub_key_direct_source or finnhub_key_block_source or "session/db:global_finnhub_api_key"
 
-    openai_model_direct, openai_model_direct_source = _read_first_secret_or_env_with_source(
-        ["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL", "CHATGPT_MODEL"]
-    )
-    openai_model_block, openai_model_block_source = _read_secret_block_value_with_source(
-        ["openai", "OPENAI"], ["model", "default_model", "chat_model"]
-    )
-    openai_model = (
-        openai_model_direct
-        or openai_model_block
-        or str(st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
-    )
-    openai_model_source = openai_model_direct_source or openai_model_block_source or "session/db:global_openai_model"
+    openai_model = str(st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+    openai_model_source = "session/db:global_openai_model"
 
-    claude_model_direct, claude_model_direct_source = _read_first_secret_or_env_with_source(
-        ["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL", "ANTHROPIC_MODEL"]
-    )
-    claude_model_block, claude_model_block_source = _read_secret_block_value_with_source(
-        ["claude", "CLAUDE", "anthropic", "ANTHROPIC"], ["model", "default_model", "chat_model"]
-    )
-    claude_model = (
-        claude_model_direct
-        or claude_model_block
-        or str(st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
-    )
-    claude_model_source = claude_model_direct_source or claude_model_block_source or "session/db:global_claude_model"
+    claude_model = str(st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
+    claude_model_source = "session/db:global_claude_model"
 
     return {
         "provider": provider,
@@ -8310,10 +8282,6 @@ def initialize_api_settings(force: bool = False) -> None:
     daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
     # Secure source priority: secrets/env > DB
-    provider_secret = (
-        _read_first_secret_or_env(["AI_PROVIDER", "GLOBAL_AI_PROVIDER", "DEFAULT_AI_PROVIDER"])
-        or _read_secret_block_value(["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"])
-    )
     openai_key_secret = (
         _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY", "CHATGPT_API_KEY", "GLOBAL_CHATGPT_API_KEY"])
         or _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
@@ -8336,25 +8304,13 @@ def initialize_api_settings(force: bool = False) -> None:
         _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"])
         or _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
     )
-    openai_model_secret = (
-        _read_first_secret_or_env(["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL", "CHATGPT_MODEL"])
-        or _read_secret_block_value(["openai", "OPENAI"], ["model", "default_model", "chat_model"])
-    )
-    claude_model_secret = (
-        _read_first_secret_or_env(["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL", "ANTHROPIC_MODEL"])
-        or _read_secret_block_value(
-            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
-            ["model", "default_model", "chat_model"],
-        )
-    )
-
-    global_provider = provider_secret or global_provider
+    global_provider = normalize_ai_provider(global_provider)
     global_openai_key = openai_key_secret or global_openai_key
     global_claude_key = claude_key_secret or global_claude_key
     global_alpha_key = alpha_key_secret or global_alpha_key
     global_finnhub_key = finnhub_key_secret or global_finnhub_key
-    global_openai_model = openai_model_secret or global_openai_model
-    global_claude_model = claude_model_secret or global_claude_model
+    global_openai_model = str(global_openai_model or DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL
+    global_claude_model = str(global_claude_model or DEFAULT_CLAUDE_MODEL).strip() or DEFAULT_CLAUDE_MODEL
     gh_secret = _load_github_settings_from_secrets()
     github_repo_secret = (gh_secret.get("repo") or "").strip()
     github_branch_secret = (gh_secret.get("branch") or "").strip()
@@ -8404,8 +8360,6 @@ def initialize_api_settings(force: bool = False) -> None:
         "daily_auto_snapshot_last_summary": daily_auto_last_summary,
     }
     secrets_priority_keys = set()
-    if provider_secret:
-        secrets_priority_keys.add("global_ai_provider")
     if openai_key_secret:
         secrets_priority_keys.add("global_openai_api_key")
     if claude_key_secret:
@@ -8414,10 +8368,6 @@ def initialize_api_settings(force: bool = False) -> None:
         secrets_priority_keys.add("global_alpha_vantage_api_key")
     if finnhub_key_secret:
         secrets_priority_keys.add("global_finnhub_api_key")
-    if openai_model_secret:
-        secrets_priority_keys.add("global_openai_model")
-    if claude_model_secret:
-        secrets_priority_keys.add("global_claude_model")
     if github_sync_enabled_secret:
         secrets_priority_keys.add("github_sync_enabled")
     if github_sync_on_change_secret:
@@ -13847,7 +13797,8 @@ def render_api_settings_tab() -> None:
         f"Claude `{runtime_ai_diag['claude_key_masked']}` ({runtime_ai_diag['claude_key_source']})"
     )
     st.caption(
-        "실행 기준 모델: "
+        "실행 기준 제공자/모델: "
+        f"제공자 `{ai_provider_label(runtime_ai_diag['provider'])}` ({runtime_ai_diag['provider_source']}), "
         f"OpenAI `{runtime_ai_diag['openai_model']}` ({runtime_ai_diag['openai_model_source']}), "
         f"Claude `{runtime_ai_diag['claude_model']}` ({runtime_ai_diag['claude_model_source']})"
     )
