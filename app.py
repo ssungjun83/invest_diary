@@ -6192,13 +6192,38 @@ def build_company_analysis_docx_bytes(
         if not has_stmt:
             _docx_add_paragraph(doc, "재무제표 연간 데이터가 없어 핵심 재무지표만 표시했습니다.", size_pt=10.5)
 
+    digest = build_company_investment_digest(
+        company_name=title_company,
+        ticker=title_ticker,
+        analysis_fields=analysis_fields,
+        financial_summary=fs,
+    )
+    if digest.get("has_content"):
+        _docx_add_heading(doc, "투자 참고 요약", level=1)
+        _docx_add_paragraph(doc, f"한 줄 결론: {str(digest.get('headline') or '')}", size_pt=11)
+        for card in digest.get("cards", []):
+            _docx_add_paragraph(
+                doc,
+                f"{card.get('label')}: {card.get('value')} ({card.get('note')})",
+                size_pt=10.5,
+            )
+        _docx_add_heading(doc, "좋아지는 조건", level=2)
+        for line in digest.get("strengths", []):
+            _docx_add_bullet(doc, line, size_pt=10.5)
+        _docx_add_heading(doc, "꺼려야 할 신호", level=2)
+        for line in digest.get("risks", []):
+            _docx_add_bullet(doc, line, size_pt=10.5)
+        _docx_add_heading(doc, "다음 실적 체크포인트", level=2)
+        for line in digest.get("watch_points", []):
+            _docx_add_bullet(doc, line, size_pt=10.5)
+
     sections = [
-        ("기업 개요", analysis_fields.get("company_overview", "")),
-        ("핵심 제품/서비스·돈 버는 방식", analysis_fields.get("products_services", "")),
-        ("핵심 원재료/투입요소", analysis_fields.get("raw_materials", "")),
-        ("이익 증가 요인·좋은 변화(촉매)", analysis_fields.get("profit_up_factors", "")),
-        ("이익 감소 요인(리스크)", analysis_fields.get("profit_down_factors", "")),
-        ("요약 메모", analysis_fields.get("key_takeaway", "")),
+        ("사업 개요·포지션", analysis_fields.get("company_overview", "")),
+        ("매출 엔진·돈 버는 방식", analysis_fields.get("products_services", "")),
+        ("원가 구조·민감 변수", analysis_fields.get("raw_materials", "")),
+        ("상승 시나리오·촉매", analysis_fields.get("profit_up_factors", "")),
+        ("하락 시나리오·리스크", analysis_fields.get("profit_down_factors", "")),
+        ("투자 체크포인트·한 줄 결론", analysis_fields.get("key_takeaway", "")),
     ]
     for section_title, section_text in sections:
         _docx_add_heading(doc, section_title, level=1)
@@ -6253,12 +6278,12 @@ def generate_company_analysis_with_ai(
 
 위 정보를 바탕으로 장기투자 관점의 기업 분석을 한국어로 작성해 주세요.
 반드시 JSON 객체만 출력하세요. 키는 아래와 같습니다.
-- company_overview: string (4~7문장)
-- products_services: array[string] (실제 제품/서비스/브랜드/고객군/지역을 구체명으로 6~12개)
-- raw_materials: array[string] (실제 원재료/부품/연료/물류/설비/외주요소를 구체명으로 6~12개)
-- profit_up_factors: array[string] (이익 증가 조건 + 좋은 변화/촉매 6~12개)
-- profit_down_factors: array[string] (이익 감소 조건 + 핵심 리스크 6~12개)
-- key_takeaway: string (핵심 결론 + 체크포인트 3~6문장)
+- company_overview: array[string] 또는 string (사업 구조, 고객, 지역, 가격결정력, 반복매출 여부, 사이클성을 5~8개 포인트)
+- products_services: array[string] (실제 제품/서비스/브랜드/고객군/지역을 구체명으로 6~12개. 각 줄은 '무엇을 / 누구에게 / 왜 중요한지' 형식)
+- raw_materials: array[string] (실제 원재료/부품/연료/물류/설비/외주요소를 구체명으로 6~12개. 각 줄은 '항목 / 손익 민감도 / 확인할 숫자' 형식)
+- profit_up_factors: array[string] (이익 증가 조건 + 좋은 변화/촉매 6~12개. 각 줄은 '트리거 -> 실적 영향' 형식)
+- profit_down_factors: array[string] (이익 감소 조건 + 핵심 리스크 6~12개. 각 줄은 '리스크 -> 실적 영향' 형식)
+- key_takeaway: array[string] 또는 string (투자자가 바로 참고할 결론 5~8개. 한 줄 결론, 좋아지는 조건, 꺼려야 할 신호, 다음 실적 체크포인트, 밸류/재무 해석 포함)
 
 반드시 포함할 내용:
 1) 회사가 정확히 무엇을 하는지(사업모델/고객/주요 지역/판매 채널)
@@ -6267,12 +6292,15 @@ def generate_company_analysis_with_ai(
 4) 어떤 상황에서 이익이 늘고/줄어드는지(구체 트리거)
 5) 기업에 유리한 변화(촉매)와 불리한 리스크
 6) 미래 아이템/신규 사업/신규 투자 파이프라인 최소 3개 이상
+7) 투자자가 다음 분기/반기 실적에서 확인해야 할 숫자와 문장을 직접 제시
+8) 밸류에이션/재무구조 해석을 일반론이 아니라 현재 숫자 기준으로 코멘트
 
 주의:
 - 추정 표현은 명시(예: 추정/가정)
 - 일반론 문장(예: "판매량×단가×마진")만 반복하지 말 것
 - 구글 발췌에서 제품명/원재료명/프로젝트명 등 고유명사를 최소 10개 이상 반영
 - 확인이 불확실한 항목은 '(확인필요)'를 붙일 것
+- 텍스트는 투자자가 바로 읽고 판단할 수 있게 짧고 단정하게 작성
 """
     system_prompt = "너는 재무 데이터 기반 기업분석 어시스턴트다. 반드시 JSON만 출력한다."
     text, err = call_ai_text(
@@ -6282,8 +6310,8 @@ def generate_company_analysis_with_ai(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=0.2,
-        max_output_tokens=1400,
-        timeout_sec=35,
+        max_output_tokens=1800,
+        timeout_sec=45,
     )
     if err:
         return {}, f"AI 생성 실패: {err}", google_research_note
@@ -6390,6 +6418,159 @@ def _fmt_pct_brief(value) -> str:
     return f"{num:.2f}%"
 
 
+def _metric_note_growth(value) -> tuple[str, str]:
+    num = _safe_to_float(value)
+    if num is None:
+        return "성장 데이터 없음", "neutral"
+    if num >= 15:
+        return "고성장 구간", "positive"
+    if num >= 5:
+        return "완만한 성장", "positive"
+    if num >= 0:
+        return "정체 구간", "neutral"
+    return "역성장 구간", "negative"
+
+
+def _metric_note_roe(value) -> tuple[str, str]:
+    num = _safe_to_float(value)
+    if num is None:
+        return "수익성 데이터 없음", "neutral"
+    if num >= 15:
+        return "우수한 자본효율", "positive"
+    if num >= 8:
+        return "무난한 자본효율", "neutral"
+    return "낮은 자본효율", "negative"
+
+
+def _metric_note_valuation(per_value, pbr_value) -> tuple[str, str]:
+    per_num = _safe_to_float(per_value)
+    pbr_num = _safe_to_float(pbr_value)
+    if per_num is None and pbr_num is None:
+        return "업종 비교 필요", "neutral"
+    if (per_num is not None and per_num >= 25) or (pbr_num is not None and pbr_num >= 3):
+        return "밸류 부담 가능", "negative"
+    if (per_num is not None and per_num <= 12) or (pbr_num is not None and pbr_num <= 1.2):
+        return "상대 저평가 후보", "positive"
+    return "중립 구간", "neutral"
+
+
+def _metric_note_balance(debt_value, current_ratio_value) -> tuple[str, str]:
+    debt_num = _safe_to_float(debt_value)
+    current_num = _safe_to_float(current_ratio_value)
+    if debt_num is None and current_num is None:
+        return "재무 데이터 없음", "neutral"
+    if (debt_num is not None and debt_num >= 180) or (current_num is not None and current_num < 1):
+        return "재무 부담 높음", "negative"
+    if (debt_num is not None and debt_num <= 80) or (current_num is not None and current_num >= 1.5):
+        return "재무 부담 양호", "positive"
+    return "재무 부담 보통", "neutral"
+
+
+def build_company_investment_digest(
+    company_name: str,
+    ticker: str,
+    analysis_fields: dict | None,
+    financial_summary: dict | None = None,
+) -> dict:
+    fields = analysis_fields if isinstance(analysis_fields, dict) else {}
+    fs = financial_summary if isinstance(financial_summary, dict) else {}
+
+    company_label = str(company_name or fs.get("name") or "해당 기업").strip()
+    ticker_label = clean_valid_ticker(str(ticker or ""))
+    growth_value = _safe_to_float(fs.get("revenue_growth_pct"))
+    roe_value = _safe_to_float(fs.get("roe_pct"))
+    per_value = _safe_to_float(fs.get("trailing_pe"))
+    pbr_value = _safe_to_float(fs.get("price_to_book"))
+    debt_value = _safe_to_float(fs.get("debt_to_equity"))
+    current_ratio_value = _safe_to_float(fs.get("current_ratio"))
+    op_margin_value = _safe_to_float(fs.get("operating_margin_pct"))
+    div_value = _safe_to_float(fs.get("dividend_yield_pct"))
+
+    growth_note, growth_class = _metric_note_growth(growth_value)
+    roe_note, roe_class = _metric_note_roe(roe_value)
+    valuation_note, valuation_class = _metric_note_valuation(per_value, pbr_value)
+    balance_note, balance_class = _metric_note_balance(debt_value, current_ratio_value)
+
+    up_lines = _split_report_lines(fields.get("profit_up_factors", ""))
+    down_lines = _split_report_lines(fields.get("profit_down_factors", ""))
+    takeaway_lines = _split_report_lines(fields.get("key_takeaway", ""))
+    product_lines = _split_report_lines(fields.get("products_services", ""))
+    raw_lines = _split_report_lines(fields.get("raw_materials", ""))
+
+    headline = takeaway_lines[0] if takeaway_lines else ""
+    if not headline:
+        sector = str(fs.get("sector") or fs.get("industry") or "사업").strip()
+        headline = f"{company_label}({ticker_label or '티커 미확정'})는 {sector} 변화와 수익성 유지 여부를 같이 봐야 하는 종목입니다."
+
+    watch_points: list[str] = []
+    if growth_value is not None:
+        watch_points.append(f"매출성장률 {growth_value:.2f}%가 다음 분기에도 유지/개선되는지 확인")
+    if op_margin_value is not None:
+        watch_points.append(f"영업이익률 {op_margin_value:.2f}%의 방향성과 마진 방어 여부 확인")
+    if debt_value is not None:
+        watch_points.append(f"부채 관련 지표 {debt_value:.2f} 수준이 낮아지는지 확인")
+    if div_value is not None:
+        watch_points.append(f"배당수익률 {div_value:.2f}%의 지속 가능성과 현금흐름 동행 여부 확인")
+    for line in takeaway_lines:
+        if ("확인" in line or "체크" in line or "분기" in line or "가이던스" in line) and line not in watch_points:
+            watch_points.append(line)
+    if not watch_points:
+        watch_points = [
+            "매출 성장률과 영업이익률이 같이 개선되는지 확인",
+            "영업현금흐름과 순이익이 같이 움직이는지 확인",
+            "차입 부담과 증설/투자 집행이 재무를 훼손하지 않는지 확인",
+        ]
+
+    strengths = up_lines[:3] if up_lines else product_lines[:3]
+    risks = down_lines[:3] if down_lines else raw_lines[:3]
+    if not strengths:
+        strengths = ["좋은 변화가 실적 숫자로 이어지는지 추가 확인 필요"]
+    if not risks:
+        risks = ["핵심 리스크가 충분히 정리되지 않아 추가 확인 필요"]
+
+    return {
+        "has_content": bool(headline or strengths or risks or watch_points or fs),
+        "headline": headline,
+        "strengths": strengths[:3],
+        "risks": risks[:3],
+        "watch_points": watch_points[:4],
+        "cards": [
+            {
+                "label": "성장",
+                "value": _fmt_pct_brief(growth_value),
+                "note": growth_note,
+                "note_class": growth_class,
+            },
+            {
+                "label": "수익성",
+                "value": _fmt_pct_brief(roe_value),
+                "note": roe_note,
+                "note_class": roe_class,
+            },
+            {
+                "label": "밸류",
+                "value": (
+                    f"PER {_fmt_ratio_brief(per_value)} / PBR {_fmt_ratio_brief(pbr_value)}"
+                    if (per_value is not None or pbr_value is not None)
+                    else "데이터 없음"
+                ),
+                "note": valuation_note,
+                "note_class": valuation_class,
+            },
+            {
+                "label": "재무",
+                "value": (
+                    f"D/E {_fmt_ratio_brief(debt_value)} / CR {_fmt_ratio_brief(current_ratio_value)}"
+                    if (debt_value is not None or current_ratio_value is not None)
+                    else "데이터 없음"
+                ),
+                "note": balance_note,
+                "note_class": balance_class,
+            },
+        ],
+    }
+
+
 def _extract_facts_from_google_context(google_context_text: str, limit: int = 8) -> list[str]:
     text = str(google_context_text or "").strip()
     if not text:
@@ -6435,12 +6616,14 @@ def generate_company_analysis_template(
     google_facts = _extract_facts_from_google_context(google_context_text, limit=8)
 
     base_overview = [
-        f"{name}({tkr or '티커 미확정'})는 {sector} 섹터에서 사업을 운영하는 기업입니다.",
-        "핵심은 어떤 상품/서비스를 누구에게 판매하는지와 해당 시장의 수급 구조입니다.",
+        f"{name}({tkr or '티커 미확정'})는 {sector} 섹터에서 돈을 버는 기업입니다.",
+        "투자 포인트는 무엇을 팔아 현금을 만들고, 어떤 변수에 이익이 가장 민감한지 파악하는 것입니다.",
     ]
     if country:
         base_overview.append(f"주요 상장/사업 국가는 {country}입니다.")
     base_overview.append(f"시가총액 추정치는 {market_cap_text}, 최근 매출 규모는 {revenue_text}입니다.")
+    if rev_growth_text != "데이터 없음":
+        base_overview.append(f"최근 매출성장률은 {rev_growth_text}, ROE는 {roe_text} 수준입니다.")
     if not _is_missing_summary_value(summary.get("business_summary")):
         base_overview.append("사업 개요는 확보된 재무 데이터의 회사 설명을 반영했습니다.")
     else:
@@ -6449,55 +6632,55 @@ def generate_company_analysis_template(
         base_overview.append(f"구글 검색 기반 핵심 사실: {google_facts[0]}")
 
     products = [
-        f"주요 매출원: {sector} 관련 제품/서비스 판매",
-        "돈 버는 구조: 판매량(물동량) × 단가(가격/운임) × 마진",
-        "수익성 레버: 고정비 레버리지, 가동률, 단위당 원가",
-        "고객/시장 구조: 주요 고객군·계약 방식·지역 노출 점검",
-        "실적 확인 포인트: 매출 성장률, 영업이익률, 현금흐름의 동행 여부",
+        f"매출 엔진: {sector} 관련 제품/서비스의 판매량과 가격이 핵심입니다.",
+        "읽는 법: 무엇을 누구에게 팔고, 반복매출인지 일회성 매출인지 구분해서 봐야 합니다.",
+        "가격결정력: 원가 상승을 판매가격에 전가할 수 있는지가 수익성의 핵심입니다.",
+        "고객/시장 구조: 주요 고객군, 계약 방식, 지역 노출도를 같이 점검해야 합니다.",
+        "체크 숫자: 매출 성장률, 영업이익률, 영업현금흐름이 함께 개선되는지 확인합니다.",
     ]
     if google_facts:
         for fact in google_facts[:4]:
-            products.append(f"구글 검색 기반 제품/사업 사실: {fact}")
+            products.append(f"구체 사업 단서: {fact}")
     raw_materials = [
-        "원재료/부품 조달 단가 및 가격 전가 가능성",
-        "인건비·에너지비·운영비 고정비 부담",
-        "물류/운송비와 공급망 병목",
-        "환율·금리·차입비용 변동",
-        "규제·환경비용·유지보수(CAPEX) 부담",
+        "원가 포인트: 원재료/부품 조달 단가와 가격 전가 가능성을 먼저 봐야 합니다.",
+        "고정비 포인트: 인건비·에너지비·운영비 부담이 가동률 하락 시 이익을 크게 훼손할 수 있습니다.",
+        "공급망 포인트: 물류/운송비, 공급망 병목, 외주 의존도를 같이 봐야 합니다.",
+        "금융 포인트: 환율·금리·차입비용 변동이 순이익과 현금흐름에 미치는 영향 점검이 필요합니다.",
+        "투자 포인트: 규제·환경비용·유지보수(CAPEX) 부담이 커지는지 확인해야 합니다.",
     ]
     if google_facts:
         for fact in google_facts[2:6]:
-            raw_materials.append(f"구글 검색 기반 원가/투입요소 단서: {fact}")
+            raw_materials.append(f"투입요소 단서: {fact}")
     up_factors = [
-        f"매출 성장률 개선 시 이익 증가 가능 ({rev_growth_text})",
-        f"수익성 지표 개선 여지 확대 (ROE {roe_text})",
-        "수요 회복/가격(운임) 상승/스프레드 확대",
-        "원가 하락 또는 가격 전가 성공",
-        "가동률 상승 및 고정비 레버리지 효과",
-        "신규 고객·시장 진입, 제품 믹스 고도화",
-        "비핵심 자산 정리·재무구조 개선",
-        "주주환원 확대/정책 수혜 등 긍정 촉매",
+        f"트리거: 매출 성장률이 더 개선되면 레버리지 효과로 이익 증가 가능 ({rev_growth_text})",
+        f"트리거: ROE {roe_text}가 유지·개선되면 자본효율 재평가 가능",
+        "트리거: 수요 회복·가격 상승·스프레드 확대가 동시에 나오면 실적 상향 가능",
+        "트리거: 원가 하락 또는 가격 전가 성공 시 마진 개선 가능",
+        "트리거: 가동률 상승과 고정비 레버리지가 같이 나타나면 이익 탄력 확대 가능",
+        "트리거: 신규 고객·신규 지역·제품 믹스 고도화는 밸류 재평가의 계기가 될 수 있음",
+        "트리거: 비핵심 자산 정리·재무구조 개선은 할인요인 축소에 도움",
+        "트리거: 주주환원 확대·정책 수혜는 멀티플 확장의 계기가 될 수 있음",
     ]
     if google_facts:
-        up_factors.append(f"미래 아이템/확장 단서(구글): {google_facts[-1]}")
+        up_factors.append(f"확장 단서: {google_facts[-1]}")
     down_factors = [
-        f"밸류에이션 부담 가능성 (PER {pe_text}, PBR {pb_text})",
-        f"재무 레버리지 부담 (부채비율/유사 지표 {debt_text})",
-        "수요 둔화·가격(운임) 하락·스프레드 축소",
-        "원자재/환율/금리 변동성 확대",
-        "가동률 하락 및 고정비 부담 심화",
-        "공급과잉·경쟁 심화·점유율 하락",
-        "규제/정책/환경 리스크",
-        "대규모 CAPEX 집행 실패 또는 현금흐름 악화",
+        f"리스크: 밸류에이션 부담이 커지면 조정 폭이 커질 수 있음 (PER {pe_text}, PBR {pb_text})",
+        f"리스크: 재무 레버리지 부담이 높으면 업황 둔화 시 하방이 커질 수 있음 ({debt_text})",
+        "리스크: 수요 둔화·가격 하락·스프레드 축소가 동시에 오면 이익 훼손 가능",
+        "리스크: 원자재·환율·금리 변동성이 확대되면 마진과 순이익이 흔들릴 수 있음",
+        "리스크: 가동률 하락 시 고정비 부담이 커져 이익 감소폭이 확대될 수 있음",
+        "리스크: 공급과잉·경쟁 심화·점유율 하락은 장기 멀티플 하락 요인",
+        "리스크: 규제·정책·환경비용 증가는 구조적 비용 상승으로 이어질 수 있음",
+        "리스크: 대규모 CAPEX 집행 실패 또는 현금흐름 악화는 투자 매력을 약화시킴",
     ]
     if google_facts:
         down_factors.append("구글 검색 문구 중 불확실 정보는 반드시 확인 필요(오탐 가능성).")
     takeaway = [
-        f"{name}는 {sector} 업황과 가격/비용 사이클에 실적 민감도가 큰 편입니다.",
-        "이익은 수요·단가·원가·가동률 조합에서 결정되므로 분기별 지표를 함께 추적해야 합니다.",
-        "좋은 변화(촉매): 수요 회복, 가격 전가, 원가 안정, 재무구조 개선, 정책 수혜.",
-        "핵심 리스크: 수요 둔화, 가격 하락, 비용 상승, 레버리지 부담, 규제 변화.",
-        "체크포인트: 매출/마진/현금흐름/가이던스의 동행 여부.",
+        f"[한 줄 결론] {name}는 {sector} 업황과 가격·비용 구조를 읽을 수 있어야 투자 판단이 쉬운 종목입니다.",
+        "[좋아지는 조건] 매출 성장률, 마진, 현금흐름이 동시에 개선되는 구간인지 확인해야 합니다.",
+        "[꺼려야 할 신호] 수요 둔화와 비용 상승이 함께 나타나는데 재무 부담까지 커지면 보수적으로 봐야 합니다.",
+        "[다음 실적 체크] 매출 성장률, 영업이익률, 영업현금흐름, 가이던스, 차입 부담 변화를 같이 봐야 합니다.",
+        f"[밸류/재무] 현재 숫자는 PER {pe_text}, PBR {pb_text}, 부채 관련 지표 {debt_text} 수준으로 해석이 필요합니다.",
     ]
 
     return {
@@ -10476,9 +10659,6 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     if picked_name and picked_name != current_input_name:
                         st.session_state["analysis_company_name_pending"] = picked_name
                         need_apply = True
-                    if picked_ticker and picked_ticker != current_input_ticker:
-                        st.session_state["analysis_ticker_pending"] = picked_ticker
-                        need_apply = True
                     if need_apply:
                         st.session_state["analysis_company_hint"] = "직접입력"
                         st.rerun()
@@ -10584,53 +10764,14 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     analysis_ai_provider, analysis_ai_api_key, analysis_ai_model = get_ai_settings_from_session("analysis")
 
     company_name = analysis_company_name_value
-    if company_name and (company_name != st.session_state.get("analysis_prev_company") or not analysis_ticker_value):
-        list_ticker = get_company_list_ticker(company_name)
-        market_pref = market_pref_map.get(company_name, "")
-        list_is_kr = bool(list_ticker.endswith(".KS") or list_ticker.endswith(".KQ"))
-        q_norm = normalize_company_name_for_match(company_name)
-        short_hangul_name = bool(re.search(r"[가-힣]", company_name)) and len(q_norm) <= 4
-        need_recheck = (not list_ticker) or (
-            short_hangul_name and list_is_kr and _market_pref_normalized(market_pref) != "domestic"
-        )
-
-        chosen_ticker = list_ticker
-        chosen_source = "기업 리스트 저장값" if list_ticker else ""
-        if need_recheck:
-            tkr, src = resolve_ticker_auto_with_retry(
-                company_name,
-                use_ai=bool(st.session_state.get("analysis_use_ai_ticker", False)),
-                api_key=analysis_ai_api_key,
-                model=analysis_ai_model,
-                provider=analysis_ai_provider,
-                market_preference=market_pref,
-            )
-            tkr_is_kr = bool(tkr.endswith(".KS") or tkr.endswith(".KQ")) if tkr else False
-            prefer_auto = bool(tkr) and (
-                not list_ticker
-                or (list_is_kr and not tkr_is_kr)
-                or str(src or "").startswith("웹검색")
-            )
-            if prefer_auto:
-                chosen_ticker = tkr
-                chosen_source = src
-
-        if chosen_ticker:
-            if chosen_ticker != analysis_ticker_value:
-                st.session_state["analysis_ticker_pending"] = chosen_ticker
-                st.session_state["analysis_ticker_autofill_notice"] = (
-                    f"티커 자동 입력: {chosen_ticker} ({chosen_source or '자동 탐색'})"
-                )
-            st.session_state["analysis_ticker_source"] = chosen_source or "자동 탐색"
+    if company_name and company_name != st.session_state.get("analysis_prev_company"):
+        if not analysis_ticker_value:
+            st.session_state["analysis_ticker_source"] = ""
         st.session_state["analysis_prev_company"] = company_name
 
         latest_df = analysis_all[analysis_all["stock_name"] == company_name] if not analysis_all.empty else pd.DataFrame()
         if not latest_df.empty:
             latest = latest_df.sort_values(["analysis_date", "updated_at"], ascending=False).iloc[0]
-            if not analysis_ticker_value:
-                latest_ticker = clean_valid_ticker(latest.get("ticker") or "")
-                if latest_ticker:
-                    st.session_state["analysis_ticker_pending"] = latest_ticker
             latest_financial = parse_financial_summary_json(latest.get("financial_summary_json"))
             if latest_financial:
                 st.session_state["analysis_financial_summary_cache"] = latest_financial
@@ -10640,8 +10781,6 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             st.session_state["analysis_profit_up_factors"] = latest.get("profit_up_factors") or ""
             st.session_state["analysis_profit_down_factors"] = latest.get("profit_down_factors") or ""
             st.session_state["analysis_key_takeaway"] = latest.get("note") or ""
-        if "analysis_ticker_pending" in st.session_state:
-            st.rerun()
 
     action_col1, action_col2, action_col3 = st.columns([1, 1.4, 1])
     with action_col1:
@@ -10804,9 +10943,54 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             )
             st.success(f"{company_name} 기업 분석 생성/저장을 완료했습니다.")
 
+    analysis_editor_fields = {
+        "company_overview": st.session_state.get("analysis_company_overview", ""),
+        "products_services": st.session_state.get("analysis_products_services", ""),
+        "raw_materials": st.session_state.get("analysis_raw_materials", ""),
+        "profit_up_factors": st.session_state.get("analysis_profit_up_factors", ""),
+        "profit_down_factors": st.session_state.get("analysis_profit_down_factors", ""),
+        "key_takeaway": st.session_state.get("analysis_key_takeaway", ""),
+    }
+    digest = build_company_investment_digest(
+        company_name=analysis_company_name_value,
+        ticker=analysis_ticker_value,
+        analysis_fields=analysis_editor_fields,
+        financial_summary=st.session_state.get("analysis_financial_summary_cache", {}),
+    )
+
     st.markdown("#### 기업 분석 내용")
+    st.caption("사업 구조, 원가 민감도, 상승/하락 시나리오, 다음 실적 체크포인트 순서로 읽으면 투자 참고용으로 보기 쉽습니다.")
+    if digest.get("has_content"):
+        st.markdown("##### 투자 참고 요약")
+        digest_cols = st.columns(4)
+        for idx, card in enumerate(digest.get("cards", [])[:4]):
+            with digest_cols[idx]:
+                render_summary_card(
+                    str(card.get("label") or ""),
+                    str(card.get("value") or "데이터 없음"),
+                    str(card.get("note") or ""),
+                    str(card.get("note_class") or "neutral"),
+                )
+
+        sum_col1, sum_col2, sum_col3 = st.columns([1.15, 1, 1])
+        with sum_col1:
+            st.markdown("**한 줄 결론**")
+            st.write(str(digest.get("headline") or ""))
+        with sum_col2:
+            st.markdown("**좋아지는 조건**")
+            for line in digest.get("strengths", []):
+                st.write(f"- {line}")
+        with sum_col3:
+            st.markdown("**꺼려야 할 신호**")
+            for line in digest.get("risks", []):
+                st.write(f"- {line}")
+
+        st.markdown("**다음 실적에서 볼 것**")
+        for line in digest.get("watch_points", []):
+            st.write(f"- {line}")
+
     st.text_area(
-        "기업 개요",
+        "사업 개요·포지션",
         key="analysis_company_overview",
         height=estimate_textarea_height(
             st.session_state.get("analysis_company_overview", ""),
@@ -10816,7 +11000,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         ),
     )
     st.text_area(
-        "핵심 제품/서비스·돈 버는 방식",
+        "매출 엔진·돈 버는 방식",
         key="analysis_products_services",
         height=estimate_textarea_height(
             st.session_state.get("analysis_products_services", ""),
@@ -10826,7 +11010,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         ),
     )
     st.text_area(
-        "핵심 원재료/투입요소",
+        "원가 구조·민감 변수",
         key="analysis_raw_materials",
         height=estimate_textarea_height(
             st.session_state.get("analysis_raw_materials", ""),
@@ -10836,7 +11020,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         ),
     )
     st.text_area(
-        "이익 증가 요인·좋은 변화(촉매)",
+        "상승 시나리오·촉매",
         key="analysis_profit_up_factors",
         height=estimate_textarea_height(
             st.session_state.get("analysis_profit_up_factors", ""),
@@ -10846,7 +11030,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         ),
     )
     st.text_area(
-        "이익 감소 요인(리스크)",
+        "하락 시나리오·리스크",
         key="analysis_profit_down_factors",
         height=estimate_textarea_height(
             st.session_state.get("analysis_profit_down_factors", ""),
@@ -10856,7 +11040,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         ),
     )
     st.text_area(
-        "요약 메모",
+        "투자 체크포인트·한 줄 결론",
         key="analysis_key_takeaway",
         height=estimate_textarea_height(
             st.session_state.get("analysis_key_takeaway", ""),
