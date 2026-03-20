@@ -8171,51 +8171,56 @@ def initialize_api_settings(force: bool = False) -> None:
     daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
     # Secure source priority: secrets/env > DB
-    global_provider = (
+    provider_secret = (
         _read_first_secret_or_env(["AI_PROVIDER", "GLOBAL_AI_PROVIDER", "DEFAULT_AI_PROVIDER"])
         or _read_secret_block_value(["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"])
-        or global_provider
     )
-    global_openai_key = _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"]) or global_openai_key
-    global_claude_key = _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"]) or global_claude_key
-    global_alpha_key = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or global_alpha_key
-    global_finnhub_key = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or global_finnhub_key
-    global_openai_key = (
-        _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
-        or global_openai_key
+    openai_key_secret = (
+        _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"])
+        or _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
     )
-    global_claude_key = (
-        _read_secret_block_value(
+    claude_key_secret = (
+        _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"])
+        or _read_secret_block_value(
             ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
             ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
         )
-        or global_claude_key
     )
-    global_alpha_key = (
-        _read_secret_block_value(
+    alpha_key_secret = (
+        _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"])
+        or _read_secret_block_value(
             ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA"],
             ["api_key", "key", "token", "alpha_vantage_api_key"],
         )
-        or global_alpha_key
     )
-    global_finnhub_key = (
-        _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
-        or global_finnhub_key
+    finnhub_key_secret = (
+        _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"])
+        or _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
     )
-    global_openai_model = (
+    openai_model_secret = (
         _read_first_secret_or_env(["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL"])
         or _read_secret_block_value(["openai", "OPENAI"], ["model", "default_model", "chat_model"])
-        or global_openai_model
     )
-    global_claude_model = (
+    claude_model_secret = (
         _read_first_secret_or_env(["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL"])
         or _read_secret_block_value(
             ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
             ["model", "default_model", "chat_model"],
         )
-        or global_claude_model
     )
+
+    global_provider = provider_secret or global_provider
+    global_openai_key = openai_key_secret or global_openai_key
+    global_claude_key = claude_key_secret or global_claude_key
+    global_alpha_key = alpha_key_secret or global_alpha_key
+    global_finnhub_key = finnhub_key_secret or global_finnhub_key
+    global_openai_model = openai_model_secret or global_openai_model
+    global_claude_model = claude_model_secret or global_claude_model
     gh_secret = _load_github_settings_from_secrets()
+    github_repo_secret = (gh_secret.get("repo") or "").strip()
+    github_branch_secret = (gh_secret.get("branch") or "").strip()
+    github_excel_path_secret = (gh_secret.get("excel_path") or "").strip()
+    github_token_secret = (gh_secret.get("token") or "").strip()
     github_token = (gh_secret.get("token") or "").strip() or github_token
     github_repo = _normalize_github_repo_value((gh_secret.get("repo") or "").strip()) or github_repo
     github_branch = (gh_secret.get("branch") or "").strip() or github_branch
@@ -8259,21 +8264,33 @@ def initialize_api_settings(force: bool = False) -> None:
         "daily_auto_snapshot_last_attempt_date": daily_auto_last_attempt_date,
         "daily_auto_snapshot_last_summary": daily_auto_last_summary,
     }
-    secrets_priority_keys = {
-        "global_ai_provider",
-        "global_openai_api_key",
-        "global_claude_api_key",
-        "global_alpha_vantage_api_key",
-        "global_finnhub_api_key",
-        "global_openai_model",
-        "global_claude_model",
-        "github_sync_enabled",
-        "github_sync_on_change",
-        "github_repo",
-        "github_branch",
-        "github_excel_path",
-        "github_token",
-    }
+    secrets_priority_keys = set()
+    if provider_secret:
+        secrets_priority_keys.add("global_ai_provider")
+    if openai_key_secret:
+        secrets_priority_keys.add("global_openai_api_key")
+    if claude_key_secret:
+        secrets_priority_keys.add("global_claude_api_key")
+    if alpha_key_secret:
+        secrets_priority_keys.add("global_alpha_vantage_api_key")
+    if finnhub_key_secret:
+        secrets_priority_keys.add("global_finnhub_api_key")
+    if openai_model_secret:
+        secrets_priority_keys.add("global_openai_model")
+    if claude_model_secret:
+        secrets_priority_keys.add("global_claude_model")
+    if github_sync_enabled_secret:
+        secrets_priority_keys.add("github_sync_enabled")
+    if github_sync_on_change_secret:
+        secrets_priority_keys.add("github_sync_on_change")
+    if github_repo_secret:
+        secrets_priority_keys.add("github_repo")
+    if github_branch_secret:
+        secrets_priority_keys.add("github_branch")
+    if github_excel_path_secret:
+        secrets_priority_keys.add("github_excel_path")
+    if github_token_secret:
+        secrets_priority_keys.add("github_token")
     for k, v in global_map.items():
         if force or k not in st.session_state or k in secrets_priority_keys:
             st.session_state[k] = v
