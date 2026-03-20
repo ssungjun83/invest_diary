@@ -13642,6 +13642,10 @@ def render_api_settings_tab() -> None:
         st.session_state["global_claude_model_options"] = []
     if "store_sensitive_keys" not in st.session_state:
         st.session_state["store_sensitive_keys"] = False
+    if "api_openai_model_fetch_status" not in st.session_state:
+        st.session_state["api_openai_model_fetch_status"] = ""
+    if "api_claude_model_fetch_status" not in st.session_state:
+        st.session_state["api_claude_model_fetch_status"] = ""
 
     if bool(st.session_state.get("store_sensitive_keys_inferred_legacy", False)):
         st.info("기존 DB에 저장된 민감키를 감지해 API 설정을 불러왔습니다. 원치 않으면 체크를 해제하고 다시 저장하세요.")
@@ -13687,29 +13691,44 @@ def render_api_settings_tab() -> None:
     if fetch_openai_btn or fetch_all_btn:
         models, err = fetch_openai_available_models(runtime_ai["openai_key"])
         if err:
+            st.session_state["api_openai_model_fetch_status"] = f"조회 실패: {err}"
             st.warning(err)
         else:
             st.session_state["global_openai_model_options"] = models
             current = str(st.session_state.get("global_openai_model", "") or "").strip()
             if not current or current not in models:
                 st.session_state["global_openai_model"] = models[0]
+            fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state["api_openai_model_fetch_status"] = (
+                f"조회 성공: {len(models)}개 ({fetched_at})"
+            )
             st.success(f"OpenAI 사용 가능 모델 {len(models):,.0f}개를 불러왔습니다.")
 
     if fetch_claude_btn or fetch_all_btn:
         models, err = fetch_claude_available_models(runtime_ai["claude_key"])
         if err:
+            st.session_state["api_claude_model_fetch_status"] = f"조회 실패: {err}"
             st.warning(err)
         else:
             st.session_state["global_claude_model_options"] = models
             current = str(st.session_state.get("global_claude_model", "") or "").strip()
             if not current or current not in models:
                 st.session_state["global_claude_model"] = models[0]
+            fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state["api_claude_model_fetch_status"] = (
+                f"조회 성공: {len(models)}개 ({fetched_at})"
+            )
             st.success(f"Claude 사용 가능 모델 {len(models):,.0f}개를 불러왔습니다.")
 
     openai_options = list(st.session_state.get("global_openai_model_options", []))
     current_openai = str(st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
     if current_openai and current_openai not in openai_options:
         openai_options = [current_openai] + openai_options
+    openai_status = str(st.session_state.get("api_openai_model_fetch_status", "") or "").strip()
+    if openai_status:
+        st.caption(f"OpenAI 모델 조회 상태: {openai_status}")
+    elif not st.session_state.get("global_openai_model_options"):
+        st.caption("OpenAI 모델 조회 상태: 아직 조회하지 않음. 현재 드롭다운 값은 기본값일 수 있습니다.")
     if openai_options:
         st.selectbox("OpenAI 모델", options=openai_options, key="global_openai_model")
     else:
@@ -13719,6 +13738,11 @@ def render_api_settings_tab() -> None:
     current_claude = str(st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
     if current_claude and current_claude not in claude_options:
         claude_options = [current_claude] + claude_options
+    claude_status = str(st.session_state.get("api_claude_model_fetch_status", "") or "").strip()
+    if claude_status:
+        st.caption(f"Claude 모델 조회 상태: {claude_status}")
+    elif not st.session_state.get("global_claude_model_options"):
+        st.caption("Claude 모델 조회 상태: 아직 조회하지 않음. 현재 드롭다운 값은 기본값일 수 있습니다.")
     if claude_options:
         st.selectbox("Claude 모델", options=claude_options, key="global_claude_model")
     else:
