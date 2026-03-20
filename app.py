@@ -10998,11 +10998,6 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 )
                 st.rerun()
 
-    st.markdown("##### AI 옵션")
-    st.checkbox("yfinance 티커 검색 실패 시 AI 티커 추론 사용", key="analysis_use_ai_ticker")
-    st.caption("AI 키/모델/제공자는 API 설정 탭의 공통값을 사용합니다.")
-    st.caption("기업분석 탐색원: (국내) Naver -> yfinance -> Google -> Toss -> Alpha/Finnhub, (해외) yfinance -> Naver -> Google -> Toss -> Alpha/Finnhub")
-
     c1, c2, c3, c4 = st.columns([1, 1.3, 1.1, 1.2])
     with c1:
         st.date_input("분석일", key="analysis_date")
