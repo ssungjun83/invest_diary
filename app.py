@@ -2849,8 +2849,8 @@ def call_ai_text(
                 body = {
                     "model": selected_model,
                     "input": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
+                        {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
                     ],
                     "temperature": float(temperature),
                     "max_output_tokens": int(max_output_tokens),
