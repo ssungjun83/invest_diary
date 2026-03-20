@@ -559,8 +559,26 @@ def inject_styles() -> None:
                 --flat: #64748b;
             }
 
-            html, body, .stApp, .stApp * {
+            html, body, .stApp,
+            .stApp button,
+            .stApp input,
+            .stApp textarea,
+            .stApp select,
+            .stApp label,
+            .stApp [data-testid="stMarkdownContainer"],
+            .stApp [data-testid="stCaptionContainer"],
+            .stApp [data-testid="stMetric"],
+            .stApp [data-testid="stDataFrame"],
+            .stApp [data-baseweb="select"] * {
                 font-family: 'Malgun Gothic', '맑은 고딕', sans-serif !important;
+            }
+
+            .stApp span[class*="material-symbol"],
+            .stApp i.material-icons,
+            .stApp .material-icons,
+            .stApp .material-symbols-rounded,
+            .stApp .material-symbols-outlined {
+                font-family: "Material Symbols Rounded", "Material Symbols Outlined", "Material Icons" !important;
             }
 
             .stApp {
@@ -12053,24 +12071,35 @@ def render_value_chain_tab() -> None:
 
     # ── 저장된 체인 선택 ─────────────────────────────────────────────────────
     chains = load_value_chain_list_from_db()
-    chain_options = {f"{c['chain_name']} ({c['updated_at'][:10]})": c["id"] for c in chains}
-    NEW_KEY = "── 새 이미지 분석 ──"
-    select_options = [NEW_KEY] + list(chain_options.keys())
+    NEW_KEY = "__value_chain_new__"
+    select_options = [NEW_KEY] + [int(c["id"]) for c in chains]
+    select_labels = {NEW_KEY: "── 새 이미지 분석 ──"}
+    for idx_chain, chain_row in enumerate(chains, start=1):
+        chain_id = int(chain_row["id"])
+        chain_name = str(chain_row.get("chain_name") or "밸류체인").strip() or "밸류체인"
+        updated_at = str(chain_row.get("updated_at") or "").strip()
+        updated_short = updated_at[:16] if updated_at else "시각없음"
+        select_labels[chain_id] = f"{idx_chain}. {chain_name} ({updated_short})"
     sel_col, del_col = st.columns([4, 1])
     with sel_col:
-        sel_label = st.selectbox("밸류체인 선택", options=select_options, key="value_chain_selectbox")
+        sel_value = st.selectbox(
+            "밸류체인 선택",
+            options=select_options,
+            format_func=lambda opt: select_labels.get(opt, str(opt)),
+            key="value_chain_selectbox",
+        )
     with del_col:
         st.write("")
-        del_btn = st.button("삭제", key="value_chain_del_btn", disabled=(sel_label == NEW_KEY))
-    if del_btn and sel_label != NEW_KEY:
-        delete_value_chain_from_db(chain_options[sel_label])
-        st.session_state["value_chain_notice"] = f"'{sel_label}' 체인을 삭제했습니다."
+        del_btn = st.button("삭제", key="value_chain_del_btn", disabled=(sel_value == NEW_KEY))
+    if del_btn and sel_value != NEW_KEY:
+        delete_value_chain_from_db(int(sel_value))
+        st.session_state["value_chain_notice"] = f"'{select_labels.get(sel_value, '선택 체인')}' 체인을 삭제했습니다."
         st.rerun()
 
-    selected_chain_id = chain_options.get(sel_label) if sel_label != NEW_KEY else None
+    selected_chain_id = int(sel_value) if sel_value != NEW_KEY else None
 
     # ── 새 이미지 분석 expander ──────────────────────────────────────────────
-    with st.expander("새 이미지로 밸류체인 분석", expanded=(sel_label == NEW_KEY)):
+    with st.expander("새 이미지로 밸류체인 분석", expanded=(sel_value == NEW_KEY)):
         uploader_key = f"value_chain_image_uploader_{st.session_state['value_chain_uploader_nonce']}"
         up_col2, btn_col2 = st.columns([2, 1])
         with up_col2:
@@ -12120,10 +12149,14 @@ def render_value_chain_tab() -> None:
             pending_name = str(pending.get("chain_name") or "밸류체인").strip()
             save_name = st.text_input("저장할 체인명", value=pending_name, key="value_chain_save_name_input")
             if st.button("DB에 저장", type="primary", key="value_chain_save_btn"):
-                save_value_chain_to_db(save_name, pending)
-                st.session_state["value_chain_pending_result"] = {}
-                st.session_state["value_chain_notice"] = f"'{save_name}' 밸류체인을 저장했습니다."
-                st.rerun()
+                save_name = save_name.strip()
+                if not save_name:
+                    st.warning("저장할 체인명을 입력해 주세요.")
+                else:
+                    save_value_chain_to_db(save_name, pending)
+                    st.session_state["value_chain_pending_result"] = {}
+                    st.session_state["value_chain_notice"] = f"'{save_name}' 밸류체인을 저장했습니다."
+                    st.rerun()
 
     # ── 현재 표시할 체인 결정 ────────────────────────────────────────────────
     if selected_chain_id is not None:
