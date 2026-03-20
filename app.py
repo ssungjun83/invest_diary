@@ -8241,8 +8241,23 @@ def initialize_api_settings(force: bool = False) -> None:
         "daily_auto_snapshot_last_attempt_date": daily_auto_last_attempt_date,
         "daily_auto_snapshot_last_summary": daily_auto_last_summary,
     }
+    secrets_priority_keys = {
+        "global_ai_provider",
+        "global_openai_api_key",
+        "global_claude_api_key",
+        "global_alpha_vantage_api_key",
+        "global_finnhub_api_key",
+        "global_openai_model",
+        "global_claude_model",
+        "github_sync_enabled",
+        "github_sync_on_change",
+        "github_repo",
+        "github_branch",
+        "github_excel_path",
+        "github_token",
+    }
     for k, v in global_map.items():
-        if force or k not in st.session_state:
+        if force or k not in st.session_state or k in secrets_priority_keys:
             st.session_state[k] = v
 
     # GitHub 관련은 Secrets를 항상 우선 반영한다(기존 세션 값이 있어도 덮어씀).
