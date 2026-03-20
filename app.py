@@ -7902,6 +7902,32 @@ def _get_runtime_api_settings() -> dict[str, str]:
     }
 
 
+def _sync_global_api_settings_to_legacy_aliases() -> None:
+    runtime = _get_runtime_api_settings()
+    provider = normalize_ai_provider(runtime.get("provider", "claude"))
+    openai_key = str(runtime.get("openai_key", "") or "").strip()
+    claude_key = str(runtime.get("claude_key", "") or "").strip()
+    openai_model = str(runtime.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+    claude_model = str(runtime.get("claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
+
+    selected_key = claude_key if provider == "claude" else openai_key
+    selected_model = claude_model if provider == "claude" else openai_model
+
+    for prefix in ["analysis", "score", "compare"]:
+        st.session_state[f"{prefix}_ai_provider"] = provider
+        st.session_state[f"{prefix}_openai_api_key"] = openai_key
+        st.session_state[f"{prefix}_claude_api_key"] = claude_key
+        st.session_state[f"{prefix}_openai_model"] = openai_model
+        st.session_state[f"{prefix}_claude_model"] = claude_model
+        st.session_state[f"{prefix}_ai_api_key"] = selected_key
+        st.session_state[f"{prefix}_ai_model"] = selected_model
+
+    st.session_state["analysis_ai_api_key"] = selected_key
+    st.session_state["analysis_ai_model"] = selected_model
+    st.session_state["score_ai_api_key"] = selected_key
+    st.session_state["score_ai_model"] = selected_model
+
+
 def get_github_sync_settings() -> dict[str, str | bool]:
     gh_secret = _load_github_settings_from_secrets()
     repo = _normalize_github_repo_value((gh_secret.get("repo") or "").strip()) or str(
@@ -8417,26 +8443,7 @@ def initialize_api_settings(force: bool = False) -> None:
         st.session_state["github_sync_enabled"] = github_sync_enabled
         st.session_state["github_sync_on_change"] = github_sync_on_change
 
-    for prefix in ["analysis", "score", "compare"]:
-        scoped_map = {
-            f"{prefix}_ai_provider": global_provider,
-            f"{prefix}_openai_api_key": global_openai_key,
-            f"{prefix}_claude_api_key": global_claude_key,
-            f"{prefix}_openai_model": global_openai_model,
-            f"{prefix}_claude_model": global_claude_model,
-        }
-        for k, v in scoped_map.items():
-            if force or k not in st.session_state:
-                st.session_state[k] = v
-
-    if force or "score_ai_api_key" not in st.session_state:
-        st.session_state["score_ai_api_key"] = global_claude_key
-    if force or "analysis_ai_api_key" not in st.session_state:
-        st.session_state["analysis_ai_api_key"] = global_claude_key
-    if force or "score_ai_model" not in st.session_state:
-        st.session_state["score_ai_model"] = global_claude_model
-    if force or "analysis_ai_model" not in st.session_state:
-        st.session_state["analysis_ai_model"] = global_claude_model
+    _sync_global_api_settings_to_legacy_aliases()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
