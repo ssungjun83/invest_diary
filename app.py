@@ -10998,27 +10998,6 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 )
                 st.rerun()
 
-    c1, c2, c3, c4 = st.columns([1, 1.3, 1.1, 1.2])
-    with c1:
-        st.date_input("분석일", key="analysis_date")
-    with c2:
-        st.text_input("기업명", key="analysis_company_name_input")
-    with c3:
-        st.text_input("티커", key="analysis_ticker_input", placeholder="005930.KS / AAPL")
-    with c4:
-        hint_options = ["직접입력"] + options
-        if (
-            "analysis_company_hint" in st.session_state
-            and st.session_state["analysis_company_hint"] not in hint_options
-        ):
-            st.session_state["analysis_company_hint"] = "직접입력"
-        selected = st.selectbox("기업 리스트", hint_options, index=0, key="analysis_company_hint")
-        if selected != "직접입력":
-            current_input_name = (st.session_state.get("analysis_company_name_input") or "").strip()
-            if selected != current_input_name:
-                st.session_state["analysis_company_name_pending"] = selected
-                st.rerun()
-
     st.markdown("</div>", unsafe_allow_html=True)
     return
 
