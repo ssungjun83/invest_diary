@@ -2877,7 +2877,7 @@ def call_ai_text(
                 continue
             break
 
-    return "", f"{label} API 호출 실패: {last_exc}"
+    return "", f"{label} API 호출 실패: {_short_http_error_detail(last_exc) if last_exc else '원인 미상'}"
 
 
 def infer_ticker_with_ai(
@@ -7605,6 +7605,30 @@ def _read_first_secret_or_env(keys: list[str]) -> str:
     return ""
 
 
+def _read_first_secret_or_env_with_source(keys: list[str]) -> tuple[str, str]:
+    for key in keys:
+        value = ""
+        key_variants = [str(key or "").strip()]
+        upper_key = key_variants[0].upper()
+        lower_key = key_variants[0].lower()
+        if upper_key and upper_key not in key_variants:
+            key_variants.append(upper_key)
+        if lower_key and lower_key not in key_variants:
+            key_variants.append(lower_key)
+        for key_variant in key_variants:
+            try:
+                value = str(st.secrets.get(key_variant, "") or "").strip()
+            except Exception:
+                value = ""
+            if value:
+                return value, f"secrets:{key_variant}"
+        for key_variant in key_variants:
+            value = str(os.getenv(key_variant, "") or "").strip()
+            if value:
+                return value, f"env:{key_variant}"
+    return "", ""
+
+
 def _read_secret_block_value(block_names: list[str], keys: list[str]) -> str:
     for block_name in block_names:
         block = {}
@@ -7641,6 +7665,53 @@ def _read_secret_block_value(block_names: list[str], keys: list[str]) -> str:
                 if value:
                     return value
     return ""
+
+
+def _read_secret_block_value_with_source(block_names: list[str], keys: list[str]) -> tuple[str, str]:
+    for block_name in block_names:
+        block = {}
+        try:
+            maybe = st.secrets.get(block_name, {})
+            if isinstance(maybe, dict):
+                block = maybe
+            else:
+                try:
+                    block = dict(maybe)
+                except Exception:
+                    block = {}
+        except Exception:
+            block = {}
+        if not block:
+            continue
+
+        for key in keys:
+            key_text = str(key or "").strip()
+            if not key_text:
+                continue
+            key_variants = [key_text]
+            upper_key = key_text.upper()
+            lower_key = key_text.lower()
+            if upper_key not in key_variants:
+                key_variants.append(upper_key)
+            if lower_key not in key_variants:
+                key_variants.append(lower_key)
+            for key_variant in key_variants:
+                try:
+                    value = str(block.get(key_variant, "") or "").strip()
+                except Exception:
+                    value = ""
+                if value:
+                    return value, f"secrets:{block_name}.{key_variant}"
+    return "", ""
+
+
+def _mask_secret_preview(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "없음"
+    if len(text) <= 10:
+        return f"{text[:3]}...{text[-2:]}"
+    return f"{text[:7]}...{text[-4:]}"
 
 
 def _normalize_github_repo_value(repo_text: str) -> str:
@@ -7734,58 +7805,100 @@ def _load_github_settings_from_secrets() -> dict[str, str]:
 
 
 def _get_runtime_api_settings() -> dict[str, str]:
+    provider_direct, provider_direct_source = _read_first_secret_or_env_with_source(
+        ["AI_PROVIDER", "GLOBAL_AI_PROVIDER", "DEFAULT_AI_PROVIDER"]
+    )
+    provider_block, provider_block_source = _read_secret_block_value_with_source(
+        ["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"]
+    )
     provider = normalize_ai_provider(
-        _read_first_secret_or_env(["AI_PROVIDER", "GLOBAL_AI_PROVIDER", "DEFAULT_AI_PROVIDER"])
-        or _read_secret_block_value(["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"])
-        or st.session_state.get("global_ai_provider", "claude")
+        provider_direct or provider_block or st.session_state.get("global_ai_provider", "claude")
     )
-    openai_key = (
-        _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"])
-        or _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
-        or str(st.session_state.get("global_openai_api_key", "") or "").strip()
+    provider_source = provider_direct_source or provider_block_source or "session/db:global_ai_provider"
+
+    openai_key_direct, openai_key_direct_source = _read_first_secret_or_env_with_source(
+        ["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY", "CHATGPT_API_KEY", "GLOBAL_CHATGPT_API_KEY"]
     )
-    claude_key = (
-        _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"])
-        or _read_secret_block_value(
-            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
-            ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
-        )
-        or str(st.session_state.get("global_claude_api_key", "") or "").strip()
+    openai_key_block, openai_key_block_source = _read_secret_block_value_with_source(
+        ["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"]
     )
-    alpha_key = (
-        _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"])
-        or _read_secret_block_value(
-            ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA"],
-            ["api_key", "key", "token", "alpha_vantage_api_key"],
-        )
-        or str(st.session_state.get("global_alpha_vantage_api_key", "") or "").strip()
+    openai_key = openai_key_direct or openai_key_block or str(st.session_state.get("global_openai_api_key", "") or "").strip()
+    openai_key_source = openai_key_direct_source or openai_key_block_source or "session/db:global_openai_api_key"
+
+    claude_key_direct, claude_key_direct_source = _read_first_secret_or_env_with_source(
+        ["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "GLOBAL_ANTHROPIC_API_KEY"]
     )
-    finnhub_key = (
-        _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"])
-        or _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
-        or str(st.session_state.get("global_finnhub_api_key", "") or "").strip()
+    claude_key_block, claude_key_block_source = _read_secret_block_value_with_source(
+        ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
+        ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
+    )
+    claude_key = claude_key_direct or claude_key_block or str(st.session_state.get("global_claude_api_key", "") or "").strip()
+    claude_key_source = claude_key_direct_source or claude_key_block_source or "session/db:global_claude_api_key"
+
+    alpha_key_direct, alpha_key_direct_source = _read_first_secret_or_env_with_source(
+        ["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]
+    )
+    alpha_key_block, alpha_key_block_source = _read_secret_block_value_with_source(
+        ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA"],
+        ["api_key", "key", "token", "alpha_vantage_api_key"],
+    )
+    alpha_key = alpha_key_direct or alpha_key_block or str(st.session_state.get("global_alpha_vantage_api_key", "") or "").strip()
+    alpha_key_source = alpha_key_direct_source or alpha_key_block_source or "session/db:global_alpha_vantage_api_key"
+
+    finnhub_key_direct, finnhub_key_direct_source = _read_first_secret_or_env_with_source(
+        ["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]
+    )
+    finnhub_key_block, finnhub_key_block_source = _read_secret_block_value_with_source(
+        ["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"]
+    )
+    finnhub_key = finnhub_key_direct or finnhub_key_block or str(st.session_state.get("global_finnhub_api_key", "") or "").strip()
+    finnhub_key_source = finnhub_key_direct_source or finnhub_key_block_source or "session/db:global_finnhub_api_key"
+
+    openai_model_direct, openai_model_direct_source = _read_first_secret_or_env_with_source(
+        ["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL", "CHATGPT_MODEL"]
+    )
+    openai_model_block, openai_model_block_source = _read_secret_block_value_with_source(
+        ["openai", "OPENAI"], ["model", "default_model", "chat_model"]
     )
     openai_model = (
-        _read_first_secret_or_env(["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL"])
-        or _read_secret_block_value(["openai", "OPENAI"], ["model", "default_model", "chat_model"])
+        openai_model_direct
+        or openai_model_block
         or str(st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
     )
+    openai_model_source = openai_model_direct_source or openai_model_block_source or "session/db:global_openai_model"
+
+    claude_model_direct, claude_model_direct_source = _read_first_secret_or_env_with_source(
+        ["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL", "ANTHROPIC_MODEL"]
+    )
+    claude_model_block, claude_model_block_source = _read_secret_block_value_with_source(
+        ["claude", "CLAUDE", "anthropic", "ANTHROPIC"], ["model", "default_model", "chat_model"]
+    )
     claude_model = (
-        _read_first_secret_or_env(["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL"])
-        or _read_secret_block_value(
-            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
-            ["model", "default_model", "chat_model"],
-        )
+        claude_model_direct
+        or claude_model_block
         or str(st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
     )
+    claude_model_source = claude_model_direct_source or claude_model_block_source or "session/db:global_claude_model"
+
     return {
         "provider": provider,
+        "provider_source": provider_source,
         "openai_key": str(openai_key or "").strip(),
+        "openai_key_source": openai_key_source,
+        "openai_key_masked": _mask_secret_preview(openai_key),
         "claude_key": str(claude_key or "").strip(),
+        "claude_key_source": claude_key_source,
+        "claude_key_masked": _mask_secret_preview(claude_key),
         "alpha_key": str(alpha_key or "").strip(),
+        "alpha_key_source": alpha_key_source,
+        "alpha_key_masked": _mask_secret_preview(alpha_key),
         "finnhub_key": str(finnhub_key or "").strip(),
+        "finnhub_key_source": finnhub_key_source,
+        "finnhub_key_masked": _mask_secret_preview(finnhub_key),
         "openai_model": str(openai_model or DEFAULT_OPENAI_MODEL).strip(),
+        "openai_model_source": openai_model_source,
         "claude_model": str(claude_model or DEFAULT_CLAUDE_MODEL).strip(),
+        "claude_model_source": claude_model_source,
     }
 
 
@@ -8176,11 +8289,11 @@ def initialize_api_settings(force: bool = False) -> None:
         or _read_secret_block_value(["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"])
     )
     openai_key_secret = (
-        _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"])
+        _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY", "CHATGPT_API_KEY", "GLOBAL_CHATGPT_API_KEY"])
         or _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
     )
     claude_key_secret = (
-        _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"])
+        _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "GLOBAL_ANTHROPIC_API_KEY"])
         or _read_secret_block_value(
             ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
             ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
@@ -8198,11 +8311,11 @@ def initialize_api_settings(force: bool = False) -> None:
         or _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
     )
     openai_model_secret = (
-        _read_first_secret_or_env(["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL"])
+        _read_first_secret_or_env(["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL", "CHATGPT_MODEL"])
         or _read_secret_block_value(["openai", "OPENAI"], ["model", "default_model", "chat_model"])
     )
     claude_model_secret = (
-        _read_first_secret_or_env(["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL"])
+        _read_first_secret_or_env(["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL", "ANTHROPIC_MODEL"])
         or _read_secret_block_value(
             ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
             ["model", "default_model", "chat_model"],
@@ -8340,7 +8453,7 @@ def fetch_openai_available_models(api_key: str) -> tuple[list[str], str]:
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        return [], f"OpenAI 모델 조회 실패: {exc}"
+        return [], f"OpenAI 모델 조회 실패: {_short_http_error_detail(exc)}"
 
     model_ids = []
     for item in data.get("data", []):
@@ -8370,7 +8483,7 @@ def fetch_claude_available_models(api_key: str) -> tuple[list[str], str]:
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        return [], f"Claude 모델 조회 실패: {exc}"
+        return [], f"Claude 모델 조회 실패: {_short_http_error_detail(exc)}"
 
     model_ids = []
     for item in data.get("data", []):
@@ -13720,6 +13833,17 @@ def render_api_settings_tab() -> None:
         type="password",
         placeholder="finnhub 키",
     )
+    runtime_ai_diag = _get_runtime_api_settings()
+    st.caption(
+        "실행 기준 키: "
+        f"OpenAI `{runtime_ai_diag['openai_key_masked']}` ({runtime_ai_diag['openai_key_source']}), "
+        f"Claude `{runtime_ai_diag['claude_key_masked']}` ({runtime_ai_diag['claude_key_source']})"
+    )
+    st.caption(
+        "실행 기준 모델: "
+        f"OpenAI `{runtime_ai_diag['openai_model']}` ({runtime_ai_diag['openai_model_source']}), "
+        f"Claude `{runtime_ai_diag['claude_model']}` ({runtime_ai_diag['claude_model_source']})"
+    )
     st.checkbox(
         "민감키를 로컬 DB에 저장 (비권장)",
         key="store_sensitive_keys",
@@ -13736,7 +13860,7 @@ def render_api_settings_tab() -> None:
     with fetch_col3:
         fetch_all_btn = st.button("모델 전체 조회", key="api_fetch_all_models_btn")
 
-    runtime_ai = _get_runtime_api_settings()
+    runtime_ai = runtime_ai_diag
 
     if fetch_openai_btn or fetch_all_btn:
         models, err = fetch_openai_available_models(runtime_ai["openai_key"])
