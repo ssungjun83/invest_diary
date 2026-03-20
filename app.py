@@ -10080,6 +10080,18 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         next_ticker = clean_valid_ticker(st.session_state.pop("analysis_ticker_pending") or "")
         st.session_state["analysis_ticker_input"] = next_ticker
         st.session_state["analysis_ticker"] = next_ticker
+    if "analysis_profile_revenue_model_pending" in st.session_state:
+        st.session_state["analysis_profile_revenue_model"] = str(
+            st.session_state.pop("analysis_profile_revenue_model_pending") or ""
+        ).strip()
+    if "analysis_profile_business_environment_pending" in st.session_state:
+        st.session_state["analysis_profile_business_environment"] = str(
+            st.session_state.pop("analysis_profile_business_environment_pending") or ""
+        ).strip()
+    if "analysis_profile_watch_points_pending" in st.session_state:
+        st.session_state["analysis_profile_watch_points"] = str(
+            st.session_state.pop("analysis_profile_watch_points_pending") or ""
+        ).strip()
     if "analysis_ticker_autofill_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_ticker_autofill_notice"))
     if "analysis_history_apply_notice" in st.session_state:
@@ -11301,18 +11313,21 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 analysis_fields=analysis,
                 financial_summary=financial_summary,
             )
-            st.session_state["analysis_profile_revenue_model"] = analysis.get(
+            profile_revenue_model = analysis.get(
                 "revenue_model",
                 profile_draft.get("revenue_model", ""),
             )
-            st.session_state["analysis_profile_business_environment"] = analysis.get(
+            profile_business_environment = analysis.get(
                 "business_environment",
                 profile_draft.get("business_environment", ""),
             )
-            st.session_state["analysis_profile_watch_points"] = analysis.get(
+            profile_watch_points = analysis.get(
                 "watch_points",
                 profile_draft.get("watch_points", ""),
             )
+            st.session_state["analysis_profile_revenue_model_pending"] = profile_revenue_model
+            st.session_state["analysis_profile_business_environment_pending"] = profile_business_environment
+            st.session_state["analysis_profile_watch_points_pending"] = profile_watch_points
             save_company_analysis(
                 analysis_date=st.session_state["analysis_date"],
                 stock_name=company_name,
@@ -11326,9 +11341,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             save_company_profile(
                 stock_name=company_name,
                 ticker=ticker,
-                revenue_model=st.session_state.get("analysis_profile_revenue_model", ""),
-                business_environment=st.session_state.get("analysis_profile_business_environment", ""),
-                watch_points=st.session_state.get("analysis_profile_watch_points", ""),
+                revenue_model=profile_revenue_model,
+                business_environment=profile_business_environment,
+                watch_points=profile_watch_points,
                 source=f"ai_profile:{used_ai_provider}",
                 ai_model=f"{ai_provider_label(used_ai_provider)}:{used_ai_model}",
             )
