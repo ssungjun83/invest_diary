@@ -10467,20 +10467,21 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 picked_ticker = clean_valid_ticker(str(overview_view_df.iloc[row_idx].get("티커") or ""))
                 picked_sector = str(overview_view_df.iloc[row_idx].get("산업섹터") or "").strip()
                 prev_selected_name = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_company"), "")
-                if picked_name and picked_name != prev_selected_name:
+                selection_changed = bool(picked_name and picked_name != prev_selected_name)
+                if selection_changed:
                     st.session_state["analysis_selected_overview_company"] = picked_name
                     st.session_state["analysis_selected_overview_ticker_input"] = picked_ticker
                     st.session_state["analysis_selected_overview_sector_input"] = picked_sector
-                need_apply = False
-                if picked_name and picked_name != current_input_name:
-                    st.session_state["analysis_company_name_pending"] = picked_name
-                    need_apply = True
-                if picked_ticker and picked_ticker != current_input_ticker:
-                    st.session_state["analysis_ticker_pending"] = picked_ticker
-                    need_apply = True
-                if need_apply:
-                    st.session_state["analysis_company_hint"] = "직접입력"
-                    st.rerun()
+                    need_apply = False
+                    if picked_name and picked_name != current_input_name:
+                        st.session_state["analysis_company_name_pending"] = picked_name
+                        need_apply = True
+                    if picked_ticker and picked_ticker != current_input_ticker:
+                        st.session_state["analysis_ticker_pending"] = picked_ticker
+                        need_apply = True
+                    if need_apply:
+                        st.session_state["analysis_company_hint"] = "직접입력"
+                        st.rerun()
 
     selected_company_for_edit = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_company"), "")
     if selected_company_for_edit:
