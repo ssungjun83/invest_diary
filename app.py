@@ -2865,8 +2865,8 @@ def call_ai_text(
                 body = {
                     "model": selected_model,
                     "input": [
-                        {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
-                        {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
                     ],
                     "temperature": float(temperature),
                     "max_output_tokens": int(max_output_tokens),
@@ -2893,23 +2893,7 @@ def call_ai_text(
                 continue
             break
 
-    final_err = _short_http_error_detail(last_exc) if last_exc else "원인 미상"
-    if normalized == "claude" and _is_claude_unavailable_error(final_err):
-        runtime = _get_runtime_api_settings()
-        openai_key = str(runtime.get("openai_key", "") or "").strip()
-        openai_model = str(runtime.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
-        if openai_key:
-            return call_ai_text(
-                provider="openai",
-                api_key=openai_key,
-                model=openai_model,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                timeout_sec=timeout_sec,
-            )
-    return "", f"{label} API 호출 실패: {final_err}"
+    return "", f"{label} API 호출 실패: {last_exc}"
 
 
 def infer_ticker_with_ai(
@@ -7404,12 +7388,11 @@ def delete_company_compare_set(set_name: str) -> None:
 
 def get_ai_settings_from_session(prefix: str) -> tuple[str, str, str]:
     _ = prefix
-    runtime = _get_runtime_api_settings()
-    provider = runtime["provider"]
-    openai_key = runtime["openai_key"]
-    claude_key = runtime["claude_key"]
-    openai_model = runtime["openai_model"]
-    claude_model = runtime["claude_model"]
+    provider = normalize_ai_provider(st.session_state.get("global_ai_provider", "claude"))
+    openai_key = (st.session_state.get("global_openai_api_key", "") or "").strip()
+    claude_key = (st.session_state.get("global_claude_api_key", "") or "").strip()
+    openai_model = (st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+    claude_model = (st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
 
     if provider == "claude":
         api_key = claude_key
@@ -7523,24 +7506,6 @@ def _run_multimodal_ai_text(
             except Exception as exc:
                 errors.append(f"{candidate_model}: {_short_http_error_detail(exc)}")
         combined_error = " | ".join(errors)
-        runtime = _get_runtime_api_settings()
-        openai_key = str(runtime.get("openai_key", "") or "").strip()
-        openai_model = str(runtime.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
-        if openai_key and _is_claude_unavailable_error(combined_error):
-            fallback_text, fallback_err = _run_multimodal_ai_text(
-                provider="openai",
-                api_key=openai_key,
-                model=openai_model,
-                image_bytes=image_bytes,
-                mime_type=media_type,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                max_output_tokens=max_output_tokens,
-            )
-            if fallback_text:
-                return fallback_text, ""
-            if fallback_err:
-                return "", f"Claude 이미지 분석 실패 후 OpenAI 대체도 실패: {combined_error} || {fallback_err}"
         return "", f"Claude 이미지 분석 실패: {combined_error}"
 
     model_candidates = []
@@ -7860,61 +7825,39 @@ def _get_runtime_api_settings() -> dict[str, str]:
     provider_source = "session/db:global_ai_provider"
 
     openai_key_direct, openai_key_direct_source = _read_first_secret_or_env_with_source(
-        ["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY", "CHATGPT_API_KEY", "GLOBAL_CHATGPT_API_KEY"]
-    )
-    openai_key_block, openai_key_block_source = _read_secret_block_value_with_source(
-        ["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"]
+        ["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"]
     )
     openai_key_session = str(st.session_state.get("global_openai_api_key", "") or "").strip()
-    openai_key = openai_key_session or openai_key_direct or openai_key_block
-    openai_key_source = (
-        "session/db:global_openai_api_key"
-        if openai_key_session
-        else (openai_key_direct_source or openai_key_block_source or "session/db:global_openai_api_key")
+    openai_key = openai_key_session or openai_key_direct
+    openai_key_source = "session/db:global_openai_api_key" if openai_key_session else (
+        openai_key_direct_source or "session/db:global_openai_api_key"
     )
 
     claude_key_direct, claude_key_direct_source = _read_first_secret_or_env_with_source(
-        ["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "GLOBAL_ANTHROPIC_API_KEY"]
-    )
-    claude_key_block, claude_key_block_source = _read_secret_block_value_with_source(
-        ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
-        ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
+        ["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"]
     )
     claude_key_session = str(st.session_state.get("global_claude_api_key", "") or "").strip()
-    claude_key = claude_key_session or claude_key_direct or claude_key_block
-    claude_key_source = (
-        "session/db:global_claude_api_key"
-        if claude_key_session
-        else (claude_key_direct_source or claude_key_block_source or "session/db:global_claude_api_key")
+    claude_key = claude_key_session or claude_key_direct
+    claude_key_source = "session/db:global_claude_api_key" if claude_key_session else (
+        claude_key_direct_source or "session/db:global_claude_api_key"
     )
 
     alpha_key_direct, alpha_key_direct_source = _read_first_secret_or_env_with_source(
         ["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]
     )
-    alpha_key_block, alpha_key_block_source = _read_secret_block_value_with_source(
-        ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA"],
-        ["api_key", "key", "token", "alpha_vantage_api_key"],
-    )
     alpha_key_session = str(st.session_state.get("global_alpha_vantage_api_key", "") or "").strip()
-    alpha_key = alpha_key_session or alpha_key_direct or alpha_key_block
-    alpha_key_source = (
-        "session/db:global_alpha_vantage_api_key"
-        if alpha_key_session
-        else (alpha_key_direct_source or alpha_key_block_source or "session/db:global_alpha_vantage_api_key")
+    alpha_key = alpha_key_session or alpha_key_direct
+    alpha_key_source = "session/db:global_alpha_vantage_api_key" if alpha_key_session else (
+        alpha_key_direct_source or "session/db:global_alpha_vantage_api_key"
     )
 
     finnhub_key_direct, finnhub_key_direct_source = _read_first_secret_or_env_with_source(
         ["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]
     )
-    finnhub_key_block, finnhub_key_block_source = _read_secret_block_value_with_source(
-        ["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"]
-    )
     finnhub_key_session = str(st.session_state.get("global_finnhub_api_key", "") or "").strip()
-    finnhub_key = finnhub_key_session or finnhub_key_direct or finnhub_key_block
-    finnhub_key_source = (
-        "session/db:global_finnhub_api_key"
-        if finnhub_key_session
-        else (finnhub_key_direct_source or finnhub_key_block_source or "session/db:global_finnhub_api_key")
+    finnhub_key = finnhub_key_session or finnhub_key_direct
+    finnhub_key_source = "session/db:global_finnhub_api_key" if finnhub_key_session else (
+        finnhub_key_direct_source or "session/db:global_finnhub_api_key"
     )
 
     openai_model = str(st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
@@ -8352,34 +8295,16 @@ def initialize_api_settings(force: bool = False) -> None:
     daily_auto_last_attempt_date = str(settings.get("daily_auto_snapshot_last_attempt_date", "") or "").strip()
     daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
-    # API 설정 화면에 저장/입력한 값을 우선 사용하고, 비어 있을 때만 secrets/env로 보완한다.
-    openai_key_secret = (
-        _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY", "CHATGPT_API_KEY", "GLOBAL_CHATGPT_API_KEY"])
-        or _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
-    )
-    claude_key_secret = (
-        _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "GLOBAL_ANTHROPIC_API_KEY"])
-        or _read_secret_block_value(
-            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
-            ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
-        )
-    )
-    alpha_key_secret = (
-        _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"])
-        or _read_secret_block_value(
-            ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA"],
-            ["api_key", "key", "token", "alpha_vantage_api_key"],
-        )
-    )
-    finnhub_key_secret = (
-        _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"])
-        or _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
-    )
+    # 2026-03-19 기준: 표준 secrets/env 키를 우선 사용하고, 없으면 DB 저장값을 쓴다.
+    openai_key_secret = _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"])
+    claude_key_secret = _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"])
+    alpha_key_secret = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"])
+    finnhub_key_secret = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"])
     global_provider = normalize_ai_provider(global_provider)
-    global_openai_key = str(global_openai_key or "").strip() or openai_key_secret
-    global_claude_key = str(global_claude_key or "").strip() or claude_key_secret
-    global_alpha_key = str(global_alpha_key or "").strip() or alpha_key_secret
-    global_finnhub_key = str(global_finnhub_key or "").strip() or finnhub_key_secret
+    global_openai_key = openai_key_secret or global_openai_key
+    global_claude_key = claude_key_secret or global_claude_key
+    global_alpha_key = alpha_key_secret or global_alpha_key
+    global_finnhub_key = finnhub_key_secret or global_finnhub_key
     global_openai_model = str(global_openai_model or DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL
     global_claude_model = str(global_claude_model or DEFAULT_CLAUDE_MODEL).strip() or DEFAULT_CLAUDE_MODEL
     gh_secret = _load_github_settings_from_secrets()
@@ -8431,6 +8356,14 @@ def initialize_api_settings(force: bool = False) -> None:
         "daily_auto_snapshot_last_summary": daily_auto_last_summary,
     }
     secrets_priority_keys = set()
+    if openai_key_secret:
+        secrets_priority_keys.add("global_openai_api_key")
+    if claude_key_secret:
+        secrets_priority_keys.add("global_claude_api_key")
+    if alpha_key_secret:
+        secrets_priority_keys.add("global_alpha_vantage_api_key")
+    if finnhub_key_secret:
+        secrets_priority_keys.add("global_finnhub_api_key")
     if github_sync_enabled_secret:
         secrets_priority_keys.add("github_sync_enabled")
     if github_sync_on_change_secret:
