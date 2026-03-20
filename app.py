@@ -7354,11 +7354,12 @@ def delete_company_compare_set(set_name: str) -> None:
 
 def get_ai_settings_from_session(prefix: str) -> tuple[str, str, str]:
     _ = prefix
-    provider = normalize_ai_provider(st.session_state.get("global_ai_provider", "claude"))
-    openai_key = (st.session_state.get("global_openai_api_key", "") or "").strip()
-    claude_key = (st.session_state.get("global_claude_api_key", "") or "").strip()
-    openai_model = (st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
-    claude_model = (st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
+    runtime = _get_runtime_api_settings()
+    provider = runtime["provider"]
+    openai_key = runtime["openai_key"]
+    claude_key = runtime["claude_key"]
+    openai_model = runtime["openai_model"]
+    claude_model = runtime["claude_model"]
 
     if provider == "claude":
         api_key = claude_key
@@ -7371,8 +7372,9 @@ def get_ai_settings_from_session(prefix: str) -> tuple[str, str, str]:
 
 def get_market_data_api_keys() -> tuple[str, str]:
     try:
-        alpha_key = (st.session_state.get("global_alpha_vantage_api_key", "") or "").strip()
-        finnhub_key = (st.session_state.get("global_finnhub_api_key", "") or "").strip()
+        runtime = _get_runtime_api_settings()
+        alpha_key = runtime["alpha_key"]
+        finnhub_key = runtime["finnhub_key"]
     except Exception:
         return "", ""
     return alpha_key, finnhub_key
@@ -7713,13 +7715,85 @@ def _load_github_settings_from_secrets() -> dict[str, str]:
     return result
 
 
-def get_github_sync_settings() -> dict[str, str | bool]:
+def _get_runtime_api_settings() -> dict[str, str]:
+    provider = normalize_ai_provider(
+        _read_first_secret_or_env(["AI_PROVIDER", "GLOBAL_AI_PROVIDER", "DEFAULT_AI_PROVIDER"])
+        or _read_secret_block_value(["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"])
+        or st.session_state.get("global_ai_provider", "claude")
+    )
+    openai_key = (
+        _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"])
+        or _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
+        or str(st.session_state.get("global_openai_api_key", "") or "").strip()
+    )
+    claude_key = (
+        _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"])
+        or _read_secret_block_value(
+            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
+            ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
+        )
+        or str(st.session_state.get("global_claude_api_key", "") or "").strip()
+    )
+    alpha_key = (
+        _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"])
+        or _read_secret_block_value(
+            ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA"],
+            ["api_key", "key", "token", "alpha_vantage_api_key"],
+        )
+        or str(st.session_state.get("global_alpha_vantage_api_key", "") or "").strip()
+    )
+    finnhub_key = (
+        _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"])
+        or _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
+        or str(st.session_state.get("global_finnhub_api_key", "") or "").strip()
+    )
+    openai_model = (
+        _read_first_secret_or_env(["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL"])
+        or _read_secret_block_value(["openai", "OPENAI"], ["model", "default_model", "chat_model"])
+        or str(st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+    )
+    claude_model = (
+        _read_first_secret_or_env(["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL"])
+        or _read_secret_block_value(
+            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
+            ["model", "default_model", "chat_model"],
+        )
+        or str(st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
+    )
     return {
-        "enabled": _to_bool_flag(st.session_state.get("github_sync_enabled", False)),
-        "repo": str(st.session_state.get("github_repo", "") or "").strip(),
-        "branch": str(st.session_state.get("github_branch", "main") or "main").strip(),
-        "excel_path": str(st.session_state.get("github_excel_path", "portfolio_auto.xlsx") or "").strip(),
-        "token": str(st.session_state.get("github_token", "") or "").strip(),
+        "provider": provider,
+        "openai_key": str(openai_key or "").strip(),
+        "claude_key": str(claude_key or "").strip(),
+        "alpha_key": str(alpha_key or "").strip(),
+        "finnhub_key": str(finnhub_key or "").strip(),
+        "openai_model": str(openai_model or DEFAULT_OPENAI_MODEL).strip(),
+        "claude_model": str(claude_model or DEFAULT_CLAUDE_MODEL).strip(),
+    }
+
+
+def get_github_sync_settings() -> dict[str, str | bool]:
+    gh_secret = _load_github_settings_from_secrets()
+    repo = _normalize_github_repo_value((gh_secret.get("repo") or "").strip()) or str(
+        st.session_state.get("github_repo", "") or ""
+    ).strip()
+    branch = (gh_secret.get("branch") or "").strip() or str(st.session_state.get("github_branch", "main") or "main").strip()
+    excel_path = (gh_secret.get("excel_path") or "").strip() or str(
+        st.session_state.get("github_excel_path", "portfolio_auto.xlsx") or ""
+    ).strip()
+    token = (gh_secret.get("token") or "").strip() or str(st.session_state.get("github_token", "") or "").strip()
+    sync_enabled_secret = str(gh_secret.get("sync_enabled") or "").strip()
+    sync_on_change_secret = str(gh_secret.get("sync_on_change") or "").strip()
+    return {
+        "enabled": _to_bool_flag(sync_enabled_secret)
+        if sync_enabled_secret
+        else _to_bool_flag(st.session_state.get("github_sync_enabled", False)),
+        "repo": repo,
+        "branch": branch,
+        "excel_path": excel_path,
+        "token": token,
+        "sync_on_change": _to_bool_flag(sync_on_change_secret)
+        if sync_on_change_secret
+        else _to_bool_flag(st.session_state.get("github_sync_on_change", True)),
     }
 
 
@@ -11323,15 +11397,16 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
             if ai_err and (analysis_ai_api_key or "").strip():
                 fallback_provider = "openai" if normalize_ai_provider(analysis_ai_provider) == "claude" else "claude"
+                runtime_ai = _get_runtime_api_settings()
                 fallback_key = (
-                    st.session_state.get("global_openai_api_key", "")
+                    runtime_ai["openai_key"]
                     if fallback_provider == "openai"
-                    else st.session_state.get("global_claude_api_key", "")
+                    else runtime_ai["claude_key"]
                 )
                 fallback_model = (
-                    st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL)
+                    runtime_ai["openai_model"]
                     if fallback_provider == "openai"
-                    else st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL)
+                    else runtime_ai["claude_model"]
                 )
                 fallback_key = (fallback_key or "").strip()
                 fallback_model = (fallback_model or "").strip()
@@ -13585,8 +13660,10 @@ def render_api_settings_tab() -> None:
     with fetch_col3:
         fetch_all_btn = st.button("모델 전체 조회", key="api_fetch_all_models_btn")
 
+    runtime_ai = _get_runtime_api_settings()
+
     if fetch_openai_btn or fetch_all_btn:
-        models, err = fetch_openai_available_models(st.session_state.get("global_openai_api_key", ""))
+        models, err = fetch_openai_available_models(runtime_ai["openai_key"])
         if err:
             st.warning(err)
         else:
@@ -13597,7 +13674,7 @@ def render_api_settings_tab() -> None:
             st.success(f"OpenAI 사용 가능 모델 {len(models):,.0f}개를 불러왔습니다.")
 
     if fetch_claude_btn or fetch_all_btn:
-        models, err = fetch_claude_available_models(st.session_state.get("global_claude_api_key", ""))
+        models, err = fetch_claude_available_models(runtime_ai["claude_key"])
         if err:
             st.warning(err)
         else:
