@@ -570,16 +570,8 @@ def inject_styles() -> None:
                     linear-gradient(180deg, #f8fafc 0%, #edf2f7 55%, #f8fafc 100%);
             }
 
-            .stApp * {
+            .stApp *:not([class*="material-symbols"]) {
                 font-family: 'Noto Sans KR', sans-serif;
-            }
-
-            /* Material Symbols 아이콘 폰트 복원 (Noto Sans 덮어쓰기 방지) */
-            .material-symbols-rounded,
-            .material-symbols-outlined,
-            [class*="material-symbols"] {
-                font-family: 'Material Symbols Rounded', 'Material Symbols Outlined' !important;
-                font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
             }
 
             .block-container {
