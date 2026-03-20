@@ -2793,6 +2793,22 @@ def _extract_openai_output_text(data: dict) -> str:
     return "\n".join([c for c in chunks if c]).strip()
 
 
+def _is_claude_unavailable_error(detail: str) -> bool:
+    text = str(detail or "").strip().lower()
+    if not text:
+        return False
+    markers = [
+        "credit balance is too low",
+        "plans & billing",
+        "insufficient credit",
+        "billing",
+        "not authorized",
+        "authentication_error",
+        "permission_error",
+    ]
+    return any(marker in text for marker in markers)
+
+
 def call_ai_text(
     provider: str,
     api_key: str,
@@ -2877,7 +2893,23 @@ def call_ai_text(
                 continue
             break
 
-    return "", f"{label} API 호출 실패: {_short_http_error_detail(last_exc) if last_exc else '원인 미상'}"
+    final_err = _short_http_error_detail(last_exc) if last_exc else "원인 미상"
+    if normalized == "claude" and _is_claude_unavailable_error(final_err):
+        runtime = _get_runtime_api_settings()
+        openai_key = str(runtime.get("openai_key", "") or "").strip()
+        openai_model = str(runtime.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+        if openai_key:
+            return call_ai_text(
+                provider="openai",
+                api_key=openai_key,
+                model=openai_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                timeout_sec=timeout_sec,
+            )
+    return "", f"{label} API 호출 실패: {final_err}"
 
 
 def infer_ticker_with_ai(
@@ -7490,7 +7522,26 @@ def _run_multimodal_ai_text(
                 return _extract_claude_text_from_response(resp.json() or {}), ""
             except Exception as exc:
                 errors.append(f"{candidate_model}: {_short_http_error_detail(exc)}")
-        return "", f"Claude 이미지 분석 실패: {' | '.join(errors)}"
+        combined_error = " | ".join(errors)
+        runtime = _get_runtime_api_settings()
+        openai_key = str(runtime.get("openai_key", "") or "").strip()
+        openai_model = str(runtime.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+        if openai_key and _is_claude_unavailable_error(combined_error):
+            fallback_text, fallback_err = _run_multimodal_ai_text(
+                provider="openai",
+                api_key=openai_key,
+                model=openai_model,
+                image_bytes=image_bytes,
+                mime_type=media_type,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_output_tokens=max_output_tokens,
+            )
+            if fallback_text:
+                return fallback_text, ""
+            if fallback_err:
+                return "", f"Claude 이미지 분석 실패 후 OpenAI 대체도 실패: {combined_error} || {fallback_err}"
+        return "", f"Claude 이미지 분석 실패: {combined_error}"
 
     model_candidates = []
     selected_model = str(model or "").strip()
