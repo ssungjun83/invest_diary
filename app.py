@@ -12991,7 +12991,7 @@ def main() -> None:
         st.session_state["github_sync_notice"] = f"내장 티커 자동 교정 완료: {corrected_builtin_global}개"
         st.rerun()
 
-    tab_options = ["대시보드", "기록 입력", "환율", "기업정보", "기업분석", "밸류체인", "기업 점수", "API 설정"]
+    tab_options = ["대시보드", "기록 입력", "환율", "기업정보", "밸류체인", "기업분석", "기업 점수", "API 설정"]
     if "active_main_tab" not in st.session_state:
         st.session_state["active_main_tab"] = "대시보드"
     if st.session_state.get("active_main_tab") not in tab_options:
@@ -13013,10 +13013,10 @@ def main() -> None:
         render_fx_tab()
     elif active_tab == "기업정보":
         render_company_analysis_tab(st.session_state["editing_df"])
-    elif active_tab == "기업분석":
-        render_company_compare_tab(st.session_state["editing_df"])
     elif active_tab == "밸류체인":
         render_value_chain_tab()
+    elif active_tab == "기업분석":
+        render_company_compare_tab(st.session_state["editing_df"])
     elif active_tab == "기업 점수":
         render_company_score_tab(st.session_state["editing_df"])
     elif active_tab == "API 설정":
