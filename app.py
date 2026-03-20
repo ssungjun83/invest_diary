@@ -8037,7 +8037,16 @@ def save_app_settings_partial(settings: dict[str, str]) -> None:
 
 def initialize_api_settings(force: bool = False) -> None:
     settings = load_app_settings()
-    store_sensitive = _to_bool_flag(settings.get("store_sensitive_keys", "false"))
+    store_sensitive_raw = str(settings.get("store_sensitive_keys", "") or "").strip()
+    legacy_sensitive_keys = [
+        "openai_api_key",
+        "claude_api_key",
+        "alpha_vantage_api_key",
+        "finnhub_api_key",
+        "github_token",
+    ]
+    legacy_sensitive_exists = any(str(settings.get(k, "") or "").strip() for k in legacy_sensitive_keys)
+    store_sensitive = _to_bool_flag(store_sensitive_raw) if store_sensitive_raw else legacy_sensitive_exists
     global_provider = normalize_ai_provider(settings.get("ai_provider", "claude"))
     global_openai_key = settings.get("openai_api_key", "") if store_sensitive else ""
     global_claude_key = settings.get("claude_api_key", "") if store_sensitive else ""
@@ -8092,6 +8101,7 @@ def initialize_api_settings(force: bool = False) -> None:
 
     global_map = {
         "store_sensitive_keys": store_sensitive,
+        "store_sensitive_keys_inferred_legacy": (not store_sensitive_raw) and legacy_sensitive_exists,
         "global_ai_provider": global_provider,
         "global_openai_api_key": global_openai_key,
         "global_claude_api_key": global_claude_key,
@@ -13491,6 +13501,9 @@ def render_api_settings_tab() -> None:
         st.session_state["global_claude_model_options"] = []
     if "store_sensitive_keys" not in st.session_state:
         st.session_state["store_sensitive_keys"] = False
+
+    if bool(st.session_state.get("store_sensitive_keys_inferred_legacy", False)):
+        st.info("기존 DB에 저장된 민감키를 감지해 API 설정을 불러왔습니다. 원치 않으면 체크를 해제하고 다시 저장하세요.")
 
     st.selectbox(
         "기본 AI 제공자",
