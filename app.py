@@ -9,7 +9,7 @@ import hashlib
 import hmac
 import html
 from io import BytesIO
-from urllib.parse import unquote
+from urllib.parse import unquote, quote_plus, urlparse
 
 import pandas as pd
 import plotly.express as px
@@ -4276,6 +4276,197 @@ def _extract_json_from_text(text: str) -> dict | list | None:
     return None
 
 
+def _normalize_research_url(url: str) -> str:
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    try:
+        parsed = urlparse(u)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}"
+    except Exception:
+        return u
+
+
+def _is_valid_google_search_result_url(url: str) -> bool:
+    u = str(url or "").strip()
+    if not u.startswith(("http://", "https://")):
+        return False
+    try:
+        host = (urlparse(u).netloc or "").lower()
+    except Exception:
+        host = ""
+    blocked_hosts = {
+        "www.google.com",
+        "google.com",
+        "support.google.com",
+        "accounts.google.com",
+        "maps.google.com",
+        "news.google.com",
+        "encrypted-tbn0.gstatic.com",
+        "encrypted-tbn1.gstatic.com",
+        "encrypted-tbn2.gstatic.com",
+        "encrypted-tbn3.gstatic.com",
+    }
+    if host in blocked_hosts:
+        return False
+    if "google." in host and "youtube.com" not in host:
+        return False
+    return True
+
+
+def _parse_google_search_markdown_results(markdown_text: str, limit: int = 10) -> list[dict]:
+    lines = (markdown_text or "").splitlines()
+    rows: list[dict] = []
+    seen: set[str] = set()
+    n = len(lines)
+
+    i = 0
+    while i < n and len(rows) < limit:
+        line = str(lines[i] or "").strip()
+        m_empty_anchor = re.match(r"^\[\]\((https?://[^)]+)\)\s*$", line)
+        m_labeled_anchor = re.match(r"^\[([^\]]+)\]\((https?://[^)]+)\)\s*$", line)
+        url = ""
+        title = ""
+        if m_empty_anchor:
+            url = html.unescape(m_empty_anchor.group(1)).strip()
+        elif m_labeled_anchor:
+            title = html.unescape(m_labeled_anchor.group(1)).strip()
+            url = html.unescape(m_labeled_anchor.group(2)).strip()
+        else:
+            i += 1
+            continue
+
+        if not _is_valid_google_search_result_url(url):
+            i += 1
+            continue
+
+        url_key = _normalize_research_url(url)
+        if not url_key or url_key in seen:
+            i += 1
+            continue
+
+        if not title:
+            for j in range(i + 1, min(i + 8, n)):
+                cand = str(lines[j] or "").strip()
+                if not cand:
+                    continue
+                if cand.startswith(("![", "[](", "[Skip ", "# ", "* ")):
+                    continue
+                if re.match(r"^\[[^\]]+\]\(https?://", cand):
+                    continue
+                if cand.lower() in {"google", "people also ask"}:
+                    continue
+                title = cand
+                break
+
+        snippet_parts: list[str] = []
+        for k in range(i + 1, min(i + 12, n)):
+            cand = str(lines[k] or "").strip()
+            if not cand:
+                continue
+            if cand.startswith(("![", "[](", "# ", "[Skip ", "* ")):
+                continue
+            if re.match(r"^\[[^\]]+\]\(https?://", cand):
+                continue
+            if title and cand == title:
+                continue
+            if len(cand) < 18:
+                continue
+            if "faviconV2" in cand or "gstatic.com" in cand:
+                continue
+            snippet_parts.append(cand)
+            if len(" ".join(snippet_parts)) >= 260:
+                break
+        snippet = " ".join(snippet_parts).strip()
+        if not title and not snippet:
+            i += 1
+            continue
+
+        try:
+            domain = (urlparse(url).netloc or "").lower()
+        except Exception:
+            domain = ""
+        rows.append(
+            {
+                "title": title or "(제목 없음)",
+                "snippet": snippet,
+                "url": url,
+                "domain": domain,
+            }
+        )
+        seen.add(url_key)
+        i += 1
+
+    return rows
+
+
+def fetch_google_company_research_context(
+    company_name: str,
+    ticker: str,
+    max_items: int = 8,
+) -> tuple[str, str]:
+    name = str(company_name or "").strip()
+    tkr = clean_valid_ticker(str(ticker or "").strip())
+    if not name:
+        return "", "구글 검색 컨텍스트 생성 실패: 기업명이 비어 있습니다."
+
+    query_parts = [name]
+    if tkr:
+        query_parts.append(tkr)
+
+    queries = [
+        " ".join(query_parts + ["products", "services", "business model", "investor presentation"]),
+        " ".join(query_parts + ["raw materials", "suppliers", "cost structure", "operations"]),
+        " ".join(query_parts + ["growth strategy", "new projects", "pipeline", "capex"]),
+    ]
+
+    all_rows: list[dict] = []
+    errs: list[str] = []
+    for q in queries:
+        url = f"https://r.jina.ai/http://www.google.com/search?q={quote_plus(q)}&hl=en&num=8"
+        try:
+            resp = requests.get(
+                url,
+                headers={**HTTP_HEADERS_COMMON, "Accept-Language": "en-US,en;q=0.9"},
+                timeout=18,
+            )
+            resp.raise_for_status()
+            parsed_rows = _parse_google_search_markdown_results(resp.text, limit=10)
+            all_rows.extend(parsed_rows)
+        except Exception as exc:
+            errs.append(str(exc))
+
+    deduped: list[dict] = []
+    seen_urls: set[str] = set()
+    for row in all_rows:
+        url_key = _normalize_research_url(row.get("url"))
+        if not url_key or url_key in seen_urls:
+            continue
+        seen_urls.add(url_key)
+        deduped.append(row)
+
+    if not deduped:
+        msg = "구글 검색 결과를 확보하지 못했습니다."
+        if errs:
+            msg = f"{msg} ({'; '.join(errs[:2])})"
+        return "", msg
+
+    context_lines = []
+    for idx, row in enumerate(deduped[: max(1, int(max_items))], start=1):
+        title = str(row.get("title") or "").strip()
+        snippet = str(row.get("snippet") or "").strip()
+        snippet = re.sub(r"\s+", " ", snippet)[:360]
+        domain = str(row.get("domain") or "").strip()
+        url = str(row.get("url") or "").strip()
+        context_lines.append(
+            f"{idx}. title={title} | snippet={snippet} | source={domain} | url={url}"
+        )
+    context_text = "\n".join(context_lines)
+    return context_text, f"google_web ({len(context_lines)}건)"
+
+
 def _is_missing_summary_value(value) -> bool:
     if value is None:
         return True
@@ -5381,31 +5572,46 @@ def generate_company_analysis_with_ai(
     api_key: str,
     model: str,
     provider: str = "openai",
-) -> tuple[dict, str]:
+    google_context_text: str = "",
+    google_research_note: str = "",
+) -> tuple[dict, str, str]:
+    if not str(google_context_text or "").strip():
+        google_context_text, google_research_note = fetch_google_company_research_context(
+            company_name=company_name,
+            ticker=ticker,
+            max_items=8,
+        )
     user_prompt = f"""
 회사명: {company_name}
 티커: {ticker}
 재무 데이터(JSON):
 {json.dumps(financial_summary, ensure_ascii=False)}
 
+구글 웹검색 발췌(기업 실체 정보, 우선 참고):
+{google_context_text or "구글 검색 컨텍스트 없음"}
+
 위 정보를 바탕으로 장기투자 관점의 기업 분석을 한국어로 작성해 주세요.
 반드시 JSON 객체만 출력하세요. 키는 아래와 같습니다.
 - company_overview: string (4~7문장)
-- products_services: array[string] (돈 버는 방식/매출원/핵심 제품·서비스 5~10개)
-- raw_materials: array[string] (원가·투입요소·마진 민감도 5~10개)
+- products_services: array[string] (실제 제품/서비스/브랜드/고객군/지역을 구체명으로 6~12개)
+- raw_materials: array[string] (실제 원재료/부품/연료/물류/설비/외주요소를 구체명으로 6~12개)
 - profit_up_factors: array[string] (이익 증가 조건 + 좋은 변화/촉매 6~12개)
 - profit_down_factors: array[string] (이익 감소 조건 + 핵심 리스크 6~12개)
 - key_takeaway: string (핵심 결론 + 체크포인트 3~6문장)
 
 반드시 포함할 내용:
-1) 회사가 정확히 무엇을 하는지(사업모델/고객/주요 지역)
-2) 어떤 구조로 돈을 버는지(매출원/운임·가격·볼륨·스프레드 등)
-3) 어떤 상황에서 이익이 늘고/줄어드는지
-4) 기업에 유리한 변화(촉매)와 불리한 리스크
+1) 회사가 정확히 무엇을 하는지(사업모델/고객/주요 지역/판매 채널)
+2) 실제 판매 제품/서비스명(고유명사)을 구체적으로 제시
+3) 실제 원재료/투입요소(고유명사)와 원가 민감도
+4) 어떤 상황에서 이익이 늘고/줄어드는지(구체 트리거)
+5) 기업에 유리한 변화(촉매)와 불리한 리스크
+6) 미래 아이템/신규 사업/신규 투자 파이프라인 최소 3개 이상
 
 주의:
 - 추정 표현은 명시(예: 추정/가정)
-- 일반론 대신 해당 기업 특성을 우선
+- 일반론 문장(예: "판매량×단가×마진")만 반복하지 말 것
+- 구글 발췌에서 제품명/원재료명/프로젝트명 등 고유명사를 최소 10개 이상 반영
+- 확인이 불확실한 항목은 '(확인필요)'를 붙일 것
 """
     system_prompt = "너는 재무 데이터 기반 기업분석 어시스턴트다. 반드시 JSON만 출력한다."
     text, err = call_ai_text(
@@ -5419,11 +5625,11 @@ def generate_company_analysis_with_ai(
         timeout_sec=35,
     )
     if err:
-        return {}, f"AI 생성 실패: {err}"
+        return {}, f"AI 생성 실패: {err}", google_research_note
 
     parsed = _extract_json_from_text(text)
     if not parsed:
-        return {}, f"AI 응답에서 JSON을 파싱하지 못했습니다. 원인: {_json_parse_failure_reason(text)}"
+        return {}, f"AI 응답에서 JSON을 파싱하지 못했습니다. 원인: {_json_parse_failure_reason(text)}", google_research_note
 
     analysis_keys = {
         "company_overview",
@@ -5463,7 +5669,7 @@ def generate_company_analysis_with_ai(
 
     parsed_obj = _extract_analysis_obj(parsed)
     if not parsed_obj:
-        return {}, "AI 응답 JSON 구조가 예상과 달라 분석 항목을 찾지 못했습니다."
+        return {}, "AI 응답 JSON 구조가 예상과 달라 분석 항목을 찾지 못했습니다.", google_research_note
 
     def _pick(obj: dict, *keys):
         for key in keys:
@@ -5498,8 +5704,8 @@ def generate_company_analysis_with_ai(
         ),
     }
     if not any((analysis.get(k) or "").strip() for k in analysis.keys()):
-        return {}, "AI 응답 JSON에 분석 본문이 비어 있습니다."
-    return analysis, ""
+        return {}, "AI 응답 JSON에 분석 본문이 비어 있습니다.", google_research_note
+    return analysis, "", google_research_note
 
 
 def _fmt_num_brief(value) -> str:
@@ -5523,7 +5729,35 @@ def _fmt_pct_brief(value) -> str:
     return f"{num:.2f}%"
 
 
-def generate_company_analysis_template(company_name: str, ticker: str, financial_summary: dict) -> dict:
+def _extract_facts_from_google_context(google_context_text: str, limit: int = 8) -> list[str]:
+    text = str(google_context_text or "").strip()
+    if not text:
+        return []
+    facts: list[str] = []
+    for line in text.splitlines():
+        ln = str(line or "").strip()
+        if not ln:
+            continue
+        ln = re.sub(r"^\d+\.\s*", "", ln)
+        ln = re.sub(r"\s*\|\s*url=https?://\S+\s*$", "", ln)
+        ln = re.sub(r"\s*\|\s*source=[^|]+", "", ln)
+        ln = re.sub(r"\s*title=", "", ln)
+        ln = re.sub(r"\s*snippet=", " / ", ln)
+        ln = re.sub(r"\s+", " ", ln).strip(" -")
+        if len(ln) < 18:
+            continue
+        facts.append(ln)
+        if len(facts) >= max(1, int(limit)):
+            break
+    return facts
+
+
+def generate_company_analysis_template(
+    company_name: str,
+    ticker: str,
+    financial_summary: dict,
+    google_context_text: str = "",
+) -> dict:
     summary = financial_summary if isinstance(financial_summary, dict) else {}
     name = str(summary.get("name") or company_name or ticker or "해당 기업").strip()
     tkr = clean_valid_ticker(ticker)
@@ -5537,6 +5771,7 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
     pe_text = _fmt_num_brief(summary.get("trailing_pe"))
     pb_text = _fmt_num_brief(summary.get("price_to_book"))
     debt_text = _fmt_num_brief(summary.get("debt_to_equity"))
+    google_facts = _extract_facts_from_google_context(google_context_text, limit=8)
 
     base_overview = [
         f"{name}({tkr or '티커 미확정'})는 {sector} 섹터에서 사업을 운영하는 기업입니다.",
@@ -5549,6 +5784,8 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
         base_overview.append("사업 개요는 확보된 재무 데이터의 회사 설명을 반영했습니다.")
     else:
         base_overview.append("세부 사업설명은 추가 공시/IR 자료 확인이 필요합니다.")
+    if google_facts:
+        base_overview.append(f"구글 검색 기반 핵심 사실: {google_facts[0]}")
 
     products = [
         f"주요 매출원: {sector} 관련 제품/서비스 판매",
@@ -5557,6 +5794,9 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
         "고객/시장 구조: 주요 고객군·계약 방식·지역 노출 점검",
         "실적 확인 포인트: 매출 성장률, 영업이익률, 현금흐름의 동행 여부",
     ]
+    if google_facts:
+        for fact in google_facts[:4]:
+            products.append(f"구글 검색 기반 제품/사업 사실: {fact}")
     raw_materials = [
         "원재료/부품 조달 단가 및 가격 전가 가능성",
         "인건비·에너지비·운영비 고정비 부담",
@@ -5564,6 +5804,9 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
         "환율·금리·차입비용 변동",
         "규제·환경비용·유지보수(CAPEX) 부담",
     ]
+    if google_facts:
+        for fact in google_facts[2:6]:
+            raw_materials.append(f"구글 검색 기반 원가/투입요소 단서: {fact}")
     up_factors = [
         f"매출 성장률 개선 시 이익 증가 가능 ({rev_growth_text})",
         f"수익성 지표 개선 여지 확대 (ROE {roe_text})",
@@ -5574,6 +5817,8 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
         "비핵심 자산 정리·재무구조 개선",
         "주주환원 확대/정책 수혜 등 긍정 촉매",
     ]
+    if google_facts:
+        up_factors.append(f"미래 아이템/확장 단서(구글): {google_facts[-1]}")
     down_factors = [
         f"밸류에이션 부담 가능성 (PER {pe_text}, PBR {pb_text})",
         f"재무 레버리지 부담 (부채비율/유사 지표 {debt_text})",
@@ -5584,6 +5829,8 @@ def generate_company_analysis_template(company_name: str, ticker: str, financial
         "규제/정책/환경 리스크",
         "대규모 CAPEX 집행 실패 또는 현금흐름 악화",
     ]
+    if google_facts:
+        down_factors.append("구글 검색 문구 중 불확실 정보는 반드시 확인 필요(오탐 가능성).")
     takeaway = [
         f"{name}는 {sector} 업황과 가격/비용 사이클에 실적 민감도가 큰 편입니다.",
         "이익은 수요·단가·원가·가동률 조합에서 결정되므로 분기별 지표를 함께 추적해야 합니다.",
@@ -9740,6 +9987,13 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             if financial_summary:
                 st.session_state["analysis_financial_summary_cache"] = financial_summary
                 st.caption(f"재무 데이터 소스: {financial_source}")
+            google_context_text, google_research_note = fetch_google_company_research_context(
+                company_name=company_name,
+                ticker=ticker,
+                max_items=8,
+            )
+            if google_research_note:
+                st.caption(f"기업 실체 정보 소스: {google_research_note}")
 
             used_ai_provider = normalize_ai_provider(analysis_ai_provider)
             used_ai_model = analysis_ai_model
@@ -9747,14 +10001,18 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             ai_err = ""
 
             if (analysis_ai_api_key or "").strip():
-                analysis, ai_err = generate_company_analysis_with_ai(
+                analysis, ai_err, research_note = generate_company_analysis_with_ai(
                     company_name=company_name,
                     ticker=ticker,
                     financial_summary=financial_summary,
                     api_key=analysis_ai_api_key,
                     model=analysis_ai_model,
                     provider=analysis_ai_provider,
+                    google_context_text=google_context_text,
+                    google_research_note=google_research_note,
                 )
+                if research_note:
+                    st.caption(f"기업 실체 정보 소스: {research_note}")
             else:
                 ai_err = "AI API 키가 없어 템플릿 기반으로 분석을 생성합니다."
 
@@ -9777,14 +10035,18 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                         f"{ai_provider_label(analysis_ai_provider)} 호출 실패로 "
                         f"{ai_provider_label(fallback_provider)} 모델로 1회 재시도합니다."
                     )
-                    fallback_analysis, fallback_err = generate_company_analysis_with_ai(
+                    fallback_analysis, fallback_err, fallback_research_note = generate_company_analysis_with_ai(
                         company_name=company_name,
                         ticker=ticker,
                         financial_summary=financial_summary,
                         api_key=fallback_key,
                         model=fallback_model,
                         provider=fallback_provider,
+                        google_context_text=google_context_text,
+                        google_research_note=google_research_note,
                     )
+                    if fallback_research_note:
+                        st.caption(f"기업 실체 정보 소스: {fallback_research_note}")
                     if not fallback_err and fallback_analysis:
                         analysis = fallback_analysis
                         ai_err = ""
@@ -9800,6 +10062,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     company_name=company_name,
                     ticker=ticker,
                     financial_summary=financial_summary,
+                    google_context_text=google_context_text,
                 )
                 used_ai_provider = "template"
                 used_ai_model = "rule-based"
