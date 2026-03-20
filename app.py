@@ -7566,12 +7566,17 @@ def estimate_dataframe_height(df: pd.DataFrame, min_height: int = 180, max_heigh
 
 
 def apply_analysis_history_to_editor(latest_row: pd.Series) -> None:
-    st.session_state["analysis_company_overview"] = str(latest_row.get("company_overview") or "")
-    st.session_state["analysis_products_services"] = str(latest_row.get("products_services") or "")
-    st.session_state["analysis_raw_materials"] = str(latest_row.get("raw_materials") or "")
-    st.session_state["analysis_profit_up_factors"] = str(latest_row.get("profit_up_factors") or "")
-    st.session_state["analysis_profit_down_factors"] = str(latest_row.get("profit_down_factors") or "")
-    st.session_state["analysis_key_takeaway"] = str(latest_row.get("note") or latest_row.get("key_takeaway") or "")
+    # Streamlit 제약: 이미 렌더된 위젯 키는 같은 실행 흐름에서 직접 재할당할 수 없다.
+    # 따라서 pending 버퍼에 적재하고, 다음 rerun 시작 시점(위젯 렌더 전)에 반영한다.
+    st.session_state["analysis_history_apply_pending"] = {
+        "analysis_company_overview": str(latest_row.get("company_overview") or ""),
+        "analysis_products_services": str(latest_row.get("products_services") or ""),
+        "analysis_raw_materials": str(latest_row.get("raw_materials") or ""),
+        "analysis_profit_up_factors": str(latest_row.get("profit_up_factors") or ""),
+        "analysis_profit_down_factors": str(latest_row.get("profit_down_factors") or ""),
+        "analysis_key_takeaway": str(latest_row.get("note") or latest_row.get("key_takeaway") or ""),
+    }
+    st.session_state["analysis_history_apply_notice"] = "선택한 이력 내용을 상단 '기업 분석 내용'에 반영했습니다."
 
 
 def add_bar_labels(fig, pct: bool = False, max_labels: int = 10):
@@ -8745,6 +8750,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_ticker"] = next_ticker
     if "analysis_ticker_autofill_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_ticker_autofill_notice"))
+    if "analysis_history_apply_notice" in st.session_state:
+        st.success(st.session_state.pop("analysis_history_apply_notice"))
     if "analysis_new_company_ticker_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_new_company_ticker_notice"))
     if "analysis_builtin_reconcile_notice" in st.session_state:
@@ -8759,6 +8766,18 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     ]:
         if key not in st.session_state:
             st.session_state[key] = ""
+    pending_history_apply = st.session_state.pop("analysis_history_apply_pending", None)
+    if isinstance(pending_history_apply, dict):
+        for key in [
+            "analysis_company_overview",
+            "analysis_products_services",
+            "analysis_raw_materials",
+            "analysis_profit_up_factors",
+            "analysis_profit_down_factors",
+            "analysis_key_takeaway",
+        ]:
+            if key in pending_history_apply:
+                st.session_state[key] = str(pending_history_apply.get(key) or "")
 
     # 위젯 상태가 배열/객체로 오염되면 레이아웃 겹침이 발생할 수 있어 렌더 전에 정규화한다.
     st.session_state["analysis_ai_provider"] = _coerce_choice(
