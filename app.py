@@ -10021,7 +10021,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     if "analysis_date" not in st.session_state:
         st.session_state["analysis_date"] = date.today()
     if "analysis_company_name" not in st.session_state:
-        st.session_state["analysis_company_name"] = options[0] if options else ""
+        st.session_state["analysis_company_name"] = ""
     if "analysis_ticker" not in st.session_state:
         st.session_state["analysis_ticker"] = ""
     if "analysis_company_name_input" not in st.session_state:
@@ -10072,6 +10072,23 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_profile_watch_points"] = ""
     if "analysis_saved_profile_name" not in st.session_state:
         st.session_state["analysis_saved_profile_name"] = "선택안함"
+    if "analysis_company_input_migration_v2" not in st.session_state:
+        st.session_state["analysis_company_input_migration_v2"] = "done"
+        current_name = str(st.session_state.get("analysis_company_name_input", "") or "").strip()
+        current_saved_profile = str(st.session_state.get("analysis_saved_profile_name", "선택안함") or "선택안함").strip()
+        current_hint = str(st.session_state.get("analysis_company_hint", "직접입력") or "직접입력").strip()
+        if (
+            current_name
+            and options
+            and current_name == options[0]
+            and current_hint == "직접입력"
+            and current_saved_profile == "선택안함"
+        ):
+            st.session_state["analysis_company_name"] = ""
+            st.session_state["analysis_company_name_input"] = ""
+            st.session_state["analysis_ticker"] = ""
+            st.session_state["analysis_ticker_input"] = ""
+            st.session_state["analysis_prev_company"] = ""
     if "analysis_company_name_pending" in st.session_state:
         next_name = (st.session_state.pop("analysis_company_name_pending") or "").strip()
         st.session_state["analysis_company_name_input"] = next_name
