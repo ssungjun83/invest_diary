@@ -7614,6 +7614,44 @@ def _read_first_secret_or_env(keys: list[str]) -> str:
     return ""
 
 
+def _read_secret_block_value(block_names: list[str], keys: list[str]) -> str:
+    for block_name in block_names:
+        block = {}
+        try:
+            maybe = st.secrets.get(block_name, {})
+            if isinstance(maybe, dict):
+                block = maybe
+            else:
+                try:
+                    block = dict(maybe)
+                except Exception:
+                    block = {}
+        except Exception:
+            block = {}
+        if not block:
+            continue
+
+        for key in keys:
+            key_text = str(key or "").strip()
+            if not key_text:
+                continue
+            key_variants = [key_text]
+            upper_key = key_text.upper()
+            lower_key = key_text.lower()
+            if upper_key not in key_variants:
+                key_variants.append(upper_key)
+            if lower_key not in key_variants:
+                key_variants.append(lower_key)
+            for key_variant in key_variants:
+                try:
+                    value = str(block.get(key_variant, "") or "").strip()
+                except Exception:
+                    value = ""
+                if value:
+                    return value
+    return ""
+
+
 def _normalize_github_repo_value(repo_text: str) -> str:
     text = str(repo_text or "").strip()
     if not text:
@@ -8070,10 +8108,50 @@ def initialize_api_settings(force: bool = False) -> None:
     daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
     # Secure source priority: secrets/env > DB
+    global_provider = (
+        _read_first_secret_or_env(["AI_PROVIDER", "GLOBAL_AI_PROVIDER", "DEFAULT_AI_PROVIDER"])
+        or _read_secret_block_value(["ai", "AI", "llm", "LLM"], ["provider", "default_provider", "vendor"])
+        or global_provider
+    )
     global_openai_key = _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"]) or global_openai_key
     global_claude_key = _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"]) or global_claude_key
     global_alpha_key = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or global_alpha_key
     global_finnhub_key = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or global_finnhub_key
+    global_openai_key = (
+        _read_secret_block_value(["openai", "OPENAI"], ["api_key", "key", "token", "openai_api_key"])
+        or global_openai_key
+    )
+    global_claude_key = (
+        _read_secret_block_value(
+            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
+            ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
+        )
+        or global_claude_key
+    )
+    global_alpha_key = (
+        _read_secret_block_value(
+            ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA"],
+            ["api_key", "key", "token", "alpha_vantage_api_key"],
+        )
+        or global_alpha_key
+    )
+    global_finnhub_key = (
+        _read_secret_block_value(["finnhub", "FINNHUB"], ["api_key", "key", "token", "finnhub_api_key"])
+        or global_finnhub_key
+    )
+    global_openai_model = (
+        _read_first_secret_or_env(["OPENAI_MODEL", "GLOBAL_OPENAI_MODEL", "DEFAULT_OPENAI_MODEL"])
+        or _read_secret_block_value(["openai", "OPENAI"], ["model", "default_model", "chat_model"])
+        or global_openai_model
+    )
+    global_claude_model = (
+        _read_first_secret_or_env(["CLAUDE_MODEL", "GLOBAL_CLAUDE_MODEL", "DEFAULT_CLAUDE_MODEL"])
+        or _read_secret_block_value(
+            ["claude", "CLAUDE", "anthropic", "ANTHROPIC"],
+            ["model", "default_model", "chat_model"],
+        )
+        or global_claude_model
+    )
     gh_secret = _load_github_settings_from_secrets()
     github_token = (gh_secret.get("token") or "").strip() or github_token
     github_repo = _normalize_github_repo_value((gh_secret.get("repo") or "").strip()) or github_repo
