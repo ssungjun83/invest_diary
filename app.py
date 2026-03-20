@@ -548,8 +548,6 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@100..900&display=swap');
-
             :root {
                 --ink: #0f172a;
                 --muted: #475569;
@@ -561,8 +559,11 @@ def inject_styles() -> None:
                 --flat: #64748b;
             }
 
+            html, body, .stApp, .stApp * {
+                font-family: 'Malgun Gothic', '맑은 고딕', sans-serif !important;
+            }
+
             .stApp {
-                font-family: 'Noto Sans KR', sans-serif;
                 background:
                     radial-gradient(1200px 480px at -10% -25%, #dbeafe 0%, rgba(219, 234, 254, 0) 70%),
                     radial-gradient(1000px 420px at 110% -15%, #ccfbf1 0%, rgba(204, 251, 241, 0) 70%),
@@ -4155,7 +4156,7 @@ def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
     )
     fig.update_layout(
         title=f"{chain_name} 매칭 흐름",
-        font=dict(size=11, family="Noto Sans KR"),
+        font=dict(size=11, family="Malgun Gothic"),
         paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=10, r=10, t=45, b=10),
     )
@@ -5825,7 +5826,7 @@ def _fmt_ratio_brief(value, digits: int = 2) -> str:
 def _set_docx_run_noto(run, size_pt: float | None = None, bold: bool | None = None) -> None:
     if run is None:
         return
-    run.font.name = "Noto Sans KR"
+    run.font.name = "Malgun Gothic"
     if size_pt is not None:
         run.font.size = Pt(size_pt)
     if bold is not None:
@@ -5833,10 +5834,10 @@ def _set_docx_run_noto(run, size_pt: float | None = None, bold: bool | None = No
     try:
         rpr = run._element.get_or_add_rPr()
         rfonts = rpr.get_or_add_rFonts()
-        rfonts.set(qn("w:ascii"), "Noto Sans KR")
-        rfonts.set(qn("w:hAnsi"), "Noto Sans KR")
-        rfonts.set(qn("w:eastAsia"), "Noto Sans KR")
-        rfonts.set(qn("w:cs"), "Noto Sans KR")
+        rfonts.set(qn("w:ascii"), "Malgun Gothic")
+        rfonts.set(qn("w:hAnsi"), "Malgun Gothic")
+        rfonts.set(qn("w:eastAsia"), "Malgun Gothic")
+        rfonts.set(qn("w:cs"), "Malgun Gothic")
     except Exception:
         pass
 
@@ -5860,16 +5861,16 @@ def _set_docx_style_noto(doc, style_name: str, size_pt: float, bold: bool = Fals
         style = doc.styles[style_name]
     except Exception:
         return
-    style.font.name = "Noto Sans KR"
+    style.font.name = "Malgun Gothic"
     style.font.size = Pt(size_pt)
     style.font.bold = bool(bold)
     try:
         rpr = style._element.get_or_add_rPr()
         rfonts = rpr.get_or_add_rFonts()
-        rfonts.set(qn("w:ascii"), "Noto Sans KR")
-        rfonts.set(qn("w:hAnsi"), "Noto Sans KR")
-        rfonts.set(qn("w:eastAsia"), "Noto Sans KR")
-        rfonts.set(qn("w:cs"), "Noto Sans KR")
+        rfonts.set(qn("w:ascii"), "Malgun Gothic")
+        rfonts.set(qn("w:hAnsi"), "Malgun Gothic")
+        rfonts.set(qn("w:eastAsia"), "Malgun Gothic")
+        rfonts.set(qn("w:cs"), "Malgun Gothic")
     except Exception:
         pass
 
@@ -8818,7 +8819,7 @@ def style_figure(fig):
         legend_title_text="",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=16, r=16, t=56, b=20),
-        font=dict(family="Noto Sans KR", color="#0f172a"),
+        font=dict(family="Malgun Gothic", color="#0f172a"),
     )
     fig.update_xaxes(
         showgrid=True,
@@ -9410,7 +9411,7 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             pie_fig.update_layout(
                 margin=dict(l=10, r=10, t=56, b=10),
                 paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="Noto Sans KR", color="#0f172a"),
+                font=dict(family="Malgun Gothic", color="#0f172a"),
             )
             st.plotly_chart(pie_fig, use_container_width=True)
 
@@ -9445,7 +9446,7 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             tree_fig.update_layout(
                 margin=dict(l=6, r=6, t=48, b=8),
                 paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="Noto Sans KR", color="#0f172a"),
+                font=dict(family="Malgun Gothic", color="#0f172a"),
             )
             st.plotly_chart(tree_fig, use_container_width=True)
 
@@ -9565,7 +9566,7 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
         heat_fig.update_layout(
             margin=dict(l=12, r=12, t=52, b=10),
             paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Noto Sans KR", color="#0f172a"),
+            font=dict(family="Malgun Gothic", color="#0f172a"),
         )
         st.plotly_chart(heat_fig, use_container_width=True)
 
@@ -12863,7 +12864,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
         radar_fig.update_layout(
             margin=dict(l=20, r=20, t=56, b=20),
             paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Noto Sans KR", color="#0f172a"),
+            font=dict(family="Malgun Gothic", color="#0f172a"),
         )
         st.plotly_chart(radar_fig, use_container_width=True)
 
@@ -12902,7 +12903,7 @@ def render_company_score_tab(current_df: pd.DataFrame) -> None:
     gauge.update_layout(
         margin=dict(l=20, r=20, t=40, b=20),
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Noto Sans KR", color="#0f172a"),
+        font=dict(family="Malgun Gothic", color="#0f172a"),
     )
     st.plotly_chart(gauge, use_container_width=True)
 
