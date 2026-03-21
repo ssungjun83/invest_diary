@@ -2739,6 +2739,85 @@ def ai_provider_label(provider: str) -> str:
     return "Claude" if normalize_ai_provider(provider) == "claude" else "OpenAI"
 
 
+def _extract_http_error_message(resp: requests.Response) -> str:
+    try:
+        payload = resp.json() or {}
+        err = payload.get("error") or {}
+        if isinstance(err, dict):
+            msg = str(err.get("message") or "").strip()
+            if msg:
+                return msg
+        msg = str(payload.get("message") or "").strip()
+        if msg:
+            return msg
+    except Exception:
+        pass
+    return str(resp.text or "").strip()[:500]
+
+
+def _post_anthropic_messages(api_key: str, body: dict, timeout_sec: int) -> tuple[dict, str]:
+    key = str(api_key or "").strip()
+    if not key:
+        return {}, "Claude API Key가 비어 있습니다."
+
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    # 일부 환경에서 /v1/messages 경로 처리 차이(redirect/405)가 있어 슬래시 포함 경로도 함께 시도.
+    candidate_urls = [
+        "https://api.anthropic.com/v1/messages",
+        "https://api.anthropic.com/v1/messages/",
+    ]
+    last_err = ""
+
+    for target_url in candidate_urls:
+        try:
+            resp = requests.post(
+                target_url,
+                headers=headers,
+                json=body,
+                timeout=int(timeout_sec),
+                allow_redirects=False,
+            )
+        except Exception as exc:
+            last_err = f"요청 실패 ({target_url}): {exc}"
+            continue
+
+        if resp.status_code in {301, 302, 303, 307, 308}:
+            location = str(resp.headers.get("Location") or "").strip()
+            if location.startswith("/"):
+                location = f"https://api.anthropic.com{location}"
+            if location:
+                try:
+                    resp = requests.post(
+                        location,
+                        headers=headers,
+                        json=body,
+                        timeout=int(timeout_sec),
+                        allow_redirects=False,
+                    )
+                except Exception as exc:
+                    last_err = f"리다이렉트 재요청 실패 ({location}): {exc}"
+                    continue
+
+        if resp.status_code >= 400:
+            err_msg = _extract_http_error_message(resp)
+            last_err = f"HTTP {resp.status_code} ({resp.request.method} {resp.url}): {err_msg}"
+            # Method Not Allowed가 나오면 대체 URL을 한 번 더 시도한다.
+            if resp.status_code == 405 and "method not allowed" in err_msg.lower():
+                continue
+            return {}, last_err
+
+        try:
+            return (resp.json() or {}), ""
+        except Exception as exc:
+            return {}, f"Claude 응답 JSON 파싱 실패 ({resp.request.method} {resp.url}): {exc}"
+
+    return {}, (last_err or "Claude 호출 실패")
+
+
 def _extract_openai_output_text(data: dict) -> str:
     text = (data.get("output_text") or "").strip()
     if text:
@@ -2787,18 +2866,13 @@ def call_ai_text(
                     "system": system_prompt,
                     "messages": [{"role": "user", "content": user_prompt}],
                 }
-                resp = requests.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": key,
-                        "anthropic-version": "2023-06-01",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                    timeout=request_timeout,
+                data, err_msg = _post_anthropic_messages(
+                    api_key=key,
+                    body=body,
+                    timeout_sec=request_timeout,
                 )
-                resp.raise_for_status()
-                data = resp.json()
+                if err_msg:
+                    raise RuntimeError(err_msg)
                 pieces = []
                 for block in data.get("content", []):
                     if block.get("type") == "text":
@@ -3681,18 +3755,13 @@ def extract_holdings_from_image_with_ai(
                     }
                 ],
             }
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=35,
+            data, err_msg = _post_anthropic_messages(
+                api_key=key,
+                body=body,
+                timeout_sec=35,
             )
-            resp.raise_for_status()
-            data = resp.json()
+            if err_msg:
+                raise RuntimeError(err_msg)
             pieces = []
             for block in data.get("content", []):
                 if block.get("type") == "text":
@@ -3806,18 +3875,13 @@ def extract_company_watchlist_from_image_with_ai(
                     }
                 ],
             }
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=35,
+            data, err_msg = _post_anthropic_messages(
+                api_key=key,
+                body=body,
+                timeout_sec=35,
             )
-            resp.raise_for_status()
-            data = resp.json()
+            if err_msg:
+                raise RuntimeError(err_msg)
             pieces = []
             for block in data.get("content", []):
                 if block.get("type") == "text":
