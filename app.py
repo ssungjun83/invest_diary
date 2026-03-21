@@ -1649,6 +1649,23 @@ def get_latest_snapshot_date_on_or_before(snapshot_date: date) -> date | None:
     return _safe_parse_date(date_text) if date_text else None
 
 
+def load_actual_snapshot_dates(desc: bool = True) -> list[date]:
+    conn = get_conn()
+    try:
+        order_sql = "DESC" if desc else "ASC"
+        rows = conn.execute(
+            f"SELECT DISTINCT snapshot_date FROM snapshots ORDER BY snapshot_date {order_sql}"
+        ).fetchall()
+    finally:
+        conn.close()
+    result: list[date] = []
+    for row in rows:
+        parsed = _safe_parse_date(str(row[0] or "").strip())
+        if parsed is not None:
+            result.append(parsed)
+    return result
+
+
 def save_snapshot_cash(snapshot_date: date, cash_krw: float | None, cash_usd: float | None) -> None:
     date_str = snapshot_date.isoformat()
     now_str = datetime.now().isoformat(timespec="seconds")
@@ -1794,21 +1811,40 @@ def load_history(as_of_date: date | None = None) -> pd.DataFrame:
     if hist_df.empty:
         return hist_df
 
-    hist_df = hist_df.sort_values("snapshot_date")
+    hist_df = hist_df.sort_values("snapshot_date").copy()
+    hist_df["snapshot_date"] = pd.to_datetime(hist_df["snapshot_date"]).dt.normalize()
+    hist_df = hist_df.drop_duplicates(subset=["snapshot_date"], keep="last")
     if as_of_date is not None:
-        hist_df = hist_df[hist_df["snapshot_date"] <= pd.Timestamp(as_of_date)].copy()
+        hist_df = hist_df[hist_df["snapshot_date"] <= pd.Timestamp(as_of_date).normalize()].copy()
         if hist_df.empty:
             return hist_df
-    hist_df["is_carry_forward"] = False
-    anchor_date = as_of_date or date.today()
-    today_ts = pd.Timestamp(anchor_date)
-    last_ts = pd.Timestamp(hist_df["snapshot_date"].max())
-    if last_ts.normalize() < today_ts.normalize():
-        carry_row = hist_df.iloc[-1].copy()
-        carry_row["snapshot_date"] = today_ts
-        carry_row["is_carry_forward"] = True
-        hist_df = pd.concat([hist_df, pd.DataFrame([carry_row])], ignore_index=True)
-        hist_df = hist_df.sort_values("snapshot_date")
+
+    hist_df["is_actual_snapshot"] = True
+    start_ts = pd.Timestamp(hist_df["snapshot_date"].min()).normalize()
+    target_end_ts = pd.Timestamp(as_of_date or date.today()).normalize()
+    last_ts = pd.Timestamp(hist_df["snapshot_date"].max()).normalize()
+    if target_end_ts < last_ts:
+        target_end_ts = last_ts
+
+    full_dates = pd.date_range(start=start_ts, end=target_end_ts, freq="D")
+    hist_df = hist_df.set_index("snapshot_date").reindex(full_dates)
+    hist_df["snapshot_date"] = hist_df.index
+    hist_df["is_actual_snapshot"] = hist_df["is_actual_snapshot"].fillna(False).astype(bool)
+
+    fill_cols = [c for c in ["total_value", "total_pnl", "cash_krw", "cash_usd"] if c in hist_df.columns]
+    if fill_cols:
+        hist_df[fill_cols] = hist_df[fill_cols].ffill()
+
+    hist_df = hist_df.dropna(subset=["total_value", "total_pnl"]).copy()
+    if "cash_krw" not in hist_df.columns:
+        hist_df["cash_krw"] = 0.0
+    if "cash_usd" not in hist_df.columns:
+        hist_df["cash_usd"] = 0.0
+    hist_df["cash_krw"] = hist_df["cash_krw"].fillna(0.0)
+    hist_df["cash_usd"] = hist_df["cash_usd"].fillna(0.0)
+
+    hist_df["is_carry_forward"] = ~hist_df["is_actual_snapshot"]
+    hist_df = hist_df.drop(columns=["is_actual_snapshot"]).reset_index(drop=True)
 
     hist_df["total_principal"] = hist_df["total_value"] - hist_df["total_pnl"]
     hist_df["total_return_pct"] = (
@@ -9761,8 +9797,8 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
             add_line_labels(core_line_fig, pct=False, last_only=False)
             st.plotly_chart(style_figure(apply_daily_date_axis(core_line_fig)), use_container_width=True)
 
-        if "is_carry_forward" in hist_df.columns and bool(hist_df.iloc[-1].get("is_carry_forward", False)):
-            st.caption("오늘 스냅샷이 없어 최근 저장 자산값을 오늘 날짜로 동일 반영했습니다.")
+        if "is_carry_forward" in hist_df.columns and bool(hist_df["is_carry_forward"].astype(bool).any()):
+            st.caption("스냅샷이 없는 날짜는 직전일 자산값을 자동 승계해 연속 구간으로 표시합니다.")
     st.markdown("</div>", unsafe_allow_html=True)
 
     if summary_available:
@@ -9979,10 +10015,7 @@ def render_dashboard(current_df: pd.DataFrame, usd_krw_rate: float, selected_dat
         use_container_width=True,
         hide_index=True,
     )
-    all_snapshot_dates = sorted(
-        pd.to_datetime(hist_df["snapshot_date"], errors="coerce").dropna().dt.date.unique().tolist(),
-        reverse=True,
-    )
+    all_snapshot_dates = load_actual_snapshot_dates(desc=True)
     if all_snapshot_dates:
         if st.session_state.pop("dashboard_delete_snapshot_confirm_reset", False):
             st.session_state["dashboard_delete_snapshot_confirm"] = False
