@@ -7172,8 +7172,10 @@ def upsert_company_list_entry(
     source_text = None if source is None else str(source).strip()
     builtin_hint = get_builtin_ticker_hint(name)
     # 자동/일괄 경로에서는 내장 티커 힌트를 우선 적용해 오탐 저장을 방지한다.
-    # 수동 편집(manual_edit)에서만 사용자의 명시 입력을 그대로 존중한다.
-    if builtin_hint and not (source_text == "manual_edit" and tkr):
+    # 단, 수동 저장 계열(source가 manual*이고 티커를 직접 입력한 경우)은 사용자 입력을 우선한다.
+    source_lower = str(source_text or "").strip().lower()
+    is_manual_source = source_lower.startswith("manual")
+    if builtin_hint and not (is_manual_source and tkr):
         tkr = builtin_hint
     now_str = datetime.now().isoformat(timespec="seconds")
 
@@ -7293,9 +7295,11 @@ def reconcile_builtin_ticker_overrides() -> int:
         if not hint:
             continue
         current = clean_valid_ticker(str(row.get("ticker") or ""))
-        if current == hint:
+        # 이미 티커가 있으면(수동/자동 포함) 사용자가 저장한 값을 유지한다.
+        # 내장 힌트는 빈 티커를 채우는 용도로만 사용한다.
+        if current:
             continue
-        upsert_company_list_entry(name, ticker=hint, source="builtin_override")
+        upsert_company_list_entry(name, ticker=hint, source="builtin_fill_empty")
         updated += 1
     return updated
 
