@@ -12582,14 +12582,47 @@ def render_value_chain_tab() -> None:
             use_container_width=True,
             hide_index=True,
         )
-        result_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
-        st.download_button(
-            "밸류체인 결과 JSON 다운로드",
-            data=result_bytes,
-            file_name=f"value_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-            mime="application/json",
-            key="value_chain_download_json_btn",
-        )
+        save_col1, save_col2, save_col3 = st.columns([2, 1, 1])
+        with save_col1:
+            current_save_name = st.text_input(
+                "저장할 체인명",
+                value=chain_name,
+                key="value_chain_save_name_current_input",
+            )
+        with save_col2:
+            st.write("")
+            save_current_btn = st.button(
+                "밸류체인 DB 저장",
+                type="primary",
+                key="value_chain_save_current_btn",
+            )
+        with save_col3:
+            st.write("")
+            result_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
+            st.download_button(
+                "밸류체인 결과 JSON 다운로드",
+                data=result_bytes,
+                file_name=f"value_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                key="value_chain_download_json_btn",
+            )
+
+        if save_current_btn:
+            save_name = str(current_save_name or "").strip()
+            if not save_name:
+                st.warning("저장할 체인명을 입력해 주세요.")
+            else:
+                save_payload = dict(result)
+                save_payload["chain_name"] = save_name
+                if selected_chain_id is not None:
+                    update_value_chain_in_db(selected_chain_id, save_name, save_payload)
+                    st.session_state["value_chain_notice"] = f"'{save_name}' 밸류체인을 DB에 업데이트했습니다."
+                else:
+                    new_id = save_value_chain_to_db(save_name, save_payload)
+                    st.session_state["value_chain_pending_result"] = {}
+                    st.session_state["value_chain_selectbox"] = int(new_id)
+                    st.session_state["value_chain_notice"] = f"'{save_name}' 밸류체인을 DB에 저장했습니다."
+                st.rerun()
 
     # ────────────────────── 키워드 탐색 ─────────────────────────────────────
     with kw_tab:
