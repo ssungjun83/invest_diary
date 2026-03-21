@@ -5,6 +5,7 @@ import base64
 import time
 from difflib import SequenceMatcher
 import os
+import shutil
 import hashlib
 import hmac
 import html
@@ -36,7 +37,16 @@ try:
 except Exception:
     HAS_MATPLOTLIB = False
 
-DB_PATH = Path("portfolio.db")
+APP_DIR = Path(__file__).resolve().parent
+DB_FILE_NAME = "portfolio.db"
+DB_DATA_DIR = Path(str(os.getenv("INVEST_DIARY_DATA_DIR", "") or "").strip() or str(APP_DIR)).expanduser().resolve()
+DB_PATH = (DB_DATA_DIR / DB_FILE_NAME).resolve()
+DB_BACKUP_DIR = (DB_DATA_DIR / "db_backups").resolve()
+try:
+    DB_BACKUP_KEEP_COUNT = max(3, int(str(os.getenv("INVEST_DIARY_DB_BACKUP_KEEP_COUNT", "") or "").strip() or "30"))
+except Exception:
+    DB_BACKUP_KEEP_COUNT = 30
+_DB_STORAGE_PREPARED = False
 DEFAULT_DATE = date.today()
 DEFAULT_EXCEL_PATH = Path("내 주식자산.xlsx")
 
@@ -108,6 +118,85 @@ FX_TRACKERS = [
     {"pair": "CAD/KRW", "ticker": "CADKRW=X"},
     {"pair": "CHF/KRW", "ticker": "CHFKRW=X"},
 ]
+
+
+def _is_valid_sqlite_file(path: Path) -> bool:
+    try:
+        if not path.exists() or not path.is_file() or path.stat().st_size < 16:
+            return False
+        with path.open("rb") as fp:
+            return fp.read(16) == b"SQLite format 3\x00"
+    except Exception:
+        return False
+
+
+def _find_legacy_db_candidate() -> Path | None:
+    try:
+        cwd_candidate = (Path.cwd() / DB_FILE_NAME).resolve()
+    except Exception:
+        return None
+    if cwd_candidate == DB_PATH:
+        return None
+    if _is_valid_sqlite_file(cwd_candidate):
+        return cwd_candidate
+    return None
+
+
+def _prune_db_backups() -> None:
+    try:
+        backups = sorted(
+            DB_BACKUP_DIR.glob(f"{Path(DB_FILE_NAME).stem}_*.db"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return
+    for old_path in backups[DB_BACKUP_KEEP_COUNT:]:
+        try:
+            old_path.unlink(missing_ok=True)
+        except Exception:
+            continue
+
+
+def _backup_db_once_per_day(reason: str = "startup") -> None:
+    if not _is_valid_sqlite_file(DB_PATH):
+        return
+    try:
+        DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        today_stamp = date.today().strftime("%Y%m%d")
+        if any(DB_BACKUP_DIR.glob(f"{Path(DB_FILE_NAME).stem}_{today_stamp}_*.db")):
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reason_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(reason or "auto")).strip("_") or "auto"
+        backup_path = DB_BACKUP_DIR / f"{Path(DB_FILE_NAME).stem}_{timestamp}_{reason_slug}.db"
+        shutil.copy2(DB_PATH, backup_path)
+        _prune_db_backups()
+    except Exception:
+        return
+
+
+def prepare_db_storage() -> None:
+    global _DB_STORAGE_PREPARED
+    if _DB_STORAGE_PREPARED:
+        return
+
+    try:
+        DB_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    if not DB_PATH.exists():
+        legacy_db = _find_legacy_db_candidate()
+        if legacy_db is not None:
+            try:
+                shutil.copy2(legacy_db, DB_PATH)
+                print(f"[DATA] 기존 DB 이관 완료: {legacy_db} -> {DB_PATH}")
+            except Exception:
+                pass
+
+    _backup_db_once_per_day(reason="startup")
+    _DB_STORAGE_PREPARED = True
+
 
 DEFAULT_TICKER_HINTS = {
     "삼성전자": "005930.KS",
@@ -792,7 +881,9 @@ def inject_styles() -> None:
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    prepare_db_storage()
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS snapshots (
@@ -14062,9 +14153,10 @@ def render_api_settings_tab() -> None:
         st.rerun()
 
     st.caption(
-        "설정은 로컬 DB(`portfolio.db`)에 저장됩니다. "
+        f"설정/자산 데이터는 로컬 DB(`{DB_PATH}`)에 저장됩니다. "
         "민감키 DB 저장을 끄면 키는 비워 저장되며, Streamlit Secrets/환경변수를 우선 사용합니다."
     )
+    st.caption(f"자동 백업 경로: `{DB_BACKUP_DIR}` (최대 {DB_BACKUP_KEEP_COUNT}개 보관)")
     st.markdown("</div>", unsafe_allow_html=True)
 
 
