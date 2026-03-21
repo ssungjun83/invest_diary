@@ -12335,6 +12335,46 @@ def _extract_value_chain_terms(text: str) -> list[str]:
     return dedup
 
 
+def _attach_value_chain_source_image(
+    chain_data: dict,
+    image_bytes: bytes | None,
+    mime_type: str = "image/png",
+    file_name: str = "",
+) -> tuple[bool, str]:
+    if not isinstance(chain_data, dict):
+        return False, "체인 데이터 형식이 올바르지 않습니다."
+    raw = image_bytes or b""
+    if not raw:
+        return False, "이미지 바이트가 비어 있습니다."
+    # DB 과도 비대화를 막기 위해 원본 저장 상한을 둔다.
+    max_bytes = 15 * 1024 * 1024
+    if len(raw) > max_bytes:
+        return False, f"이미지 용량이 커서 저장하지 않았습니다 ({len(raw)/1024/1024:.1f}MB > 15MB)."
+    try:
+        chain_data["source_image_base64"] = base64.b64encode(raw).decode("ascii")
+        chain_data["source_image_mime"] = str(mime_type or "image/png").strip() or "image/png"
+        chain_data["source_image_name"] = str(file_name or "").strip()
+        chain_data["source_image_size"] = int(len(raw))
+        chain_data["source_image_saved_at"] = datetime.now().isoformat(timespec="seconds")
+        return True, ""
+    except Exception as exc:
+        return False, f"원본 이미지 인코딩 실패: {exc}"
+
+
+def _extract_value_chain_source_image(chain_data: dict) -> tuple[bytes | None, str, str]:
+    if not isinstance(chain_data, dict):
+        return None, "image/png", ""
+    b64_text = str(chain_data.get("source_image_base64") or "").strip()
+    if not b64_text:
+        return None, "image/png", ""
+    mime = str(chain_data.get("source_image_mime") or "image/png").strip() or "image/png"
+    file_name = str(chain_data.get("source_image_name") or "").strip()
+    try:
+        return base64.b64decode(b64_text), mime, file_name
+    except Exception:
+        return None, mime, file_name
+
+
 def _append_unique_text(items: list[str], value: str) -> None:
     vv = str(value or "").strip()
     if vv and vv not in items:
@@ -12658,6 +12698,14 @@ def render_value_chain_tab() -> None:
                         parsed["created_at"] = datetime.now().isoformat(timespec="seconds")
                         parsed["overview_text"] = ""
                         parsed["overview_source"] = ""
+                        img_ok, img_msg = _attach_value_chain_source_image(
+                            parsed,
+                            image_bytes=vc_file.getvalue(),
+                            mime_type=getattr(vc_file, "type", "image/png"),
+                            file_name=getattr(vc_file, "name", ""),
+                        )
+                        if not img_ok and img_msg:
+                            st.session_state["value_chain_warning"] = img_msg
                         st.session_state["value_chain_pending_result"] = parsed
                         st.session_state["value_chain_uploader_nonce"] += 1
                         total_nodes = len(match_rows_tmp)
@@ -12718,6 +12766,14 @@ def render_value_chain_tab() -> None:
     m3.metric("관심기업 매칭", f"{matched_count:,}")
     m4.metric("미매칭", f"{unmatched_count:,}")
     st.caption(f"단계 수: {stage_count} / 생성시각: {str(result.get('created_at') or '-')}")
+    src_img_bytes, src_img_mime, src_img_name = _extract_value_chain_source_image(result)
+    if src_img_bytes:
+        with st.expander("저장된 원본 이미지", expanded=False):
+            img_caption = "저장된 업로드 이미지"
+            if src_img_name:
+                img_caption = f"저장된 업로드 이미지: {src_img_name}"
+            st.caption(f"MIME: {src_img_mime} / 크기: {len(src_img_bytes)/1024:,.1f}KB")
+            st.image(src_img_bytes, caption=img_caption, use_container_width=True)
 
     # ── AI 총 설명 (저장된 체인에만) ─────────────────────────────────────────
     if selected_chain_id is not None:
