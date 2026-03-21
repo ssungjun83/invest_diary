@@ -10461,18 +10461,21 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             if str(name).strip()
         }
     )
-    existing_delete_targets = st.session_state.get("portfolio_delete_targets", [])
+    if "portfolio_delete_nonce" not in st.session_state:
+        st.session_state["portfolio_delete_nonce"] = 0
+    delete_targets_key = f"portfolio_delete_targets_{int(st.session_state.get('portfolio_delete_nonce', 0))}"
+    existing_delete_targets = st.session_state.get(delete_targets_key, [])
     if not isinstance(existing_delete_targets, list):
         existing_delete_targets = []
     valid_delete_targets = [name for name in existing_delete_targets if name in holding_name_options]
     if valid_delete_targets != existing_delete_targets:
-        st.session_state["portfolio_delete_targets"] = valid_delete_targets
+        st.session_state[delete_targets_key] = valid_delete_targets
     delete_col1, delete_col2 = st.columns([1.5, 0.8])
     with delete_col1:
         st.multiselect(
             "삭제할 보유종목 선택",
             options=holding_name_options,
-            key="portfolio_delete_targets",
+            key=delete_targets_key,
             placeholder="잘못 등록된 종목을 선택하세요.",
         )
     with delete_col2:
@@ -10485,7 +10488,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     if delete_selected_holdings_btn:
         targets = {
             str(name).strip()
-            for name in st.session_state.get("portfolio_delete_targets", [])
+            for name in st.session_state.get(delete_targets_key, [])
             if str(name).strip()
         }
         if not targets:
@@ -10497,7 +10500,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         remained_df = ensure_portfolio_columns(remained_df, usd_krw_rate, force_usd_rate=True)
         st.session_state["editing_df"] = remained_df
         st.session_state["portfolio_editor_nonce"] = int(st.session_state.get("portfolio_editor_nonce", 0)) + 1
-        st.session_state["portfolio_delete_targets"] = []
+        st.session_state["portfolio_delete_nonce"] = int(st.session_state.get("portfolio_delete_nonce", 0)) + 1
         if removed_count > 0:
             st.session_state["portfolio_delete_notice"] = (
                 f"선택 종목 삭제 완료: {removed_count}건"
