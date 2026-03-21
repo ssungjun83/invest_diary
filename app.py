@@ -7170,25 +7170,30 @@ def upsert_company_list_entry(
         price_val = None
     p_source = (price_source or "").strip()
     source_text = None if source is None else str(source).strip()
-    builtin_hint = get_builtin_ticker_hint(name)
-    # 자동/일괄 경로에서는 내장 티커 힌트를 우선 적용해 오탐 저장을 방지한다.
-    # 단, 수동 저장 계열(source가 manual*이고 티커를 직접 입력한 경우)은 사용자 입력을 우선한다.
     source_lower = str(source_text or "").strip().lower()
     is_manual_source = source_lower.startswith("manual")
-    if builtin_hint and not (is_manual_source and tkr):
-        tkr = builtin_hint
     now_str = datetime.now().isoformat(timespec="seconds")
 
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT ticker, sector, price_krw, price_source FROM company_list WHERE stock_name = ?",
+            "SELECT ticker, sector, price_krw, price_source, source FROM company_list WHERE stock_name = ?",
             (name,),
         ).fetchone()
         existing_ticker = clean_valid_ticker((row[0] or "").strip().upper()) if row and row[0] else ""
         existing_sector = (row[1] or "").strip() if row and len(row) > 1 and row[1] else ""
         existing_price = _safe_to_float(row[2]) if row and len(row) > 2 else None
         existing_price_source = (row[3] or "").strip() if row and len(row) > 3 and row[3] else ""
+        existing_source = (row[4] or "").strip().lower() if row and len(row) > 4 and row[4] else ""
+        builtin_hint = get_builtin_ticker_hint(name)
+        # 수동으로 저장된 티커(manual*)는 자동 경로가 덮어쓰지 못하게 고정한다.
+        manual_ticker_locked = bool(existing_ticker) and existing_source.startswith("manual")
+        if manual_ticker_locked and not is_manual_source:
+            tkr = existing_ticker
+        elif builtin_hint and not (is_manual_source and tkr):
+            # 자동/일괄 경로에서는 내장 티커 힌트를 우선 적용해 오탐 저장을 방지한다.
+            # 단, 수동 저장(manual*)에서 직접 입력한 티커는 항상 사용자 값을 우선한다.
+            tkr = builtin_hint
         next_ticker = tkr or existing_ticker
         next_sector = sec or existing_sector
         next_price = price_val if price_val is not None else existing_price
