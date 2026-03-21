@@ -10297,6 +10297,15 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             key="portfolio_use_ai_date",
             help="AI가 날짜를 읽으면 해당 날짜로 저장하고, 없으면 사이드바 선택 날짜로 저장합니다.",
         )
+        st.radio(
+            "이미지 반영 방식",
+            options=["기존 데이터와 병합", "이미지 종목으로 전체 교체"],
+            key="portfolio_image_apply_mode",
+            help=(
+                "병합: 기존 종목 유지 + 동일 종목만 이미지 값으로 갱신\n"
+                "전체 교체: 해당 날짜 보유종목을 이미지에서 인식한 종목으로 전부 교체"
+            ),
+        )
         auto_register_btn = st.button("이미지로 보유현황 자동 등록/저장", type="primary", key="portfolio_image_register_btn")
 
     if pasted_image is not None:
@@ -10327,17 +10336,22 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
                     ai_date = _safe_parse_date(parsed_payload.get("as_of_date")) if isinstance(parsed_payload, dict) else None
                     if st.session_state.get("portfolio_use_ai_date", False) and ai_date is not None:
                         target_date = ai_date
+                    apply_mode = str(st.session_state.get("portfolio_image_apply_mode", "기존 데이터와 병합") or "")
+                    use_replace_mode = apply_mode == "이미지 종목으로 전체 교체"
 
                     reflected_count = 0
                     if not incoming_df.empty:
-                        # 저장 대상 날짜의 기존 스냅샷과 병합해, 같은 날짜/같은 기업은 새 이미지 값으로 덮어쓴다.
-                        if target_date == selected_date:
-                            base_df_for_target = cleaned_df
+                        if use_replace_mode:
+                            merged_df = ensure_portfolio_columns(incoming_df, usd_krw_rate, force_usd_rate=True).copy()
                         else:
-                            base_df_for_target = ensure_portfolio_columns(
-                                load_snapshot(target_date), usd_krw_rate, force_usd_rate=True
-                            )
-                        merged_df = merge_holdings_overwrite(base_df_for_target, incoming_df, usd_krw_rate)
+                            # 저장 대상 날짜의 기존 스냅샷과 병합해, 같은 날짜/같은 기업은 새 이미지 값으로 덮어쓴다.
+                            if target_date == selected_date:
+                                base_df_for_target = cleaned_df
+                            else:
+                                base_df_for_target = ensure_portfolio_columns(
+                                    load_snapshot(target_date), usd_krw_rate, force_usd_rate=True
+                                )
+                            merged_df = merge_holdings_overwrite(base_df_for_target, incoming_df, usd_krw_rate)
                         target_usd_krw = float(get_usd_krw_rate_for_date(target_date)[0])
                         company_list_for_calc = load_company_list()
                         company_price_exact2, company_price_norm2 = build_company_price_krw_maps(company_list_for_calc)
@@ -10388,8 +10402,9 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
 
                     # 성공 시 업로더를 초기화해 미리보기 이미지를 제거한다.
                     st.session_state["portfolio_image_uploader_nonce"] += 1
+                    mode_text = "전체 교체" if use_replace_mode else "병합"
                     st.session_state["portfolio_image_notice"] = (
-                        f"이미지 자동 등록 완료: {reflected_count}개 종목 반영, 저장일 {target_date.isoformat()} / "
+                        f"이미지 자동 등록 완료({mode_text}): {reflected_count}개 종목 반영, 저장일 {target_date.isoformat()} / "
                         f"예수금 원화 {final_cash_krw:,.0f}원, 달러 {format_usd(final_cash_usd)} "
                         f"(업로드 이미지 초기화 완료){sync_note}"
                     )
@@ -10431,9 +10446,66 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     )
     final_df = ensure_numeric(final_df_calc, usd_krw_rate)
 
+    if "portfolio_delete_notice" in st.session_state:
+        st.success(st.session_state.pop("portfolio_delete_notice"))
+    if "portfolio_delete_warning" in st.session_state:
+        st.warning(st.session_state.pop("portfolio_delete_warning"))
+
+    holding_name_options = sorted(
+        {
+            str(name).strip()
+            for name in final_df.get(COL_NAME, pd.Series(dtype="object")).tolist()
+            if str(name).strip()
+        }
+    )
+    existing_delete_targets = st.session_state.get("portfolio_delete_targets", [])
+    if not isinstance(existing_delete_targets, list):
+        existing_delete_targets = []
+    valid_delete_targets = [name for name in existing_delete_targets if name in holding_name_options]
+    if valid_delete_targets != existing_delete_targets:
+        st.session_state["portfolio_delete_targets"] = valid_delete_targets
+    delete_col1, delete_col2 = st.columns([1.5, 0.8])
+    with delete_col1:
+        st.multiselect(
+            "삭제할 보유종목 선택",
+            options=holding_name_options,
+            key="portfolio_delete_targets",
+            placeholder="잘못 등록된 종목을 선택하세요.",
+        )
+    with delete_col2:
+        delete_selected_holdings_btn = st.button(
+            "선택 종목 삭제",
+            key="portfolio_delete_selected_btn",
+            disabled=not holding_name_options,
+        )
+
+    if delete_selected_holdings_btn:
+        targets = {
+            str(name).strip()
+            for name in st.session_state.get("portfolio_delete_targets", [])
+            if str(name).strip()
+        }
+        if not targets:
+            st.session_state["portfolio_delete_warning"] = "삭제할 종목을 먼저 선택해 주세요."
+            st.rerun()
+
+        remained_df = final_df[~final_df[COL_NAME].astype(str).str.strip().isin(targets)].copy()
+        removed_count = int(len(final_df) - len(remained_df))
+        remained_df = ensure_portfolio_columns(remained_df, usd_krw_rate, force_usd_rate=True)
+        st.session_state["portfolio_editor"] = remained_df
+        st.session_state["editing_df"] = remained_df
+        st.session_state["portfolio_delete_targets"] = []
+        if removed_count > 0:
+            st.session_state["portfolio_delete_notice"] = (
+                f"선택 종목 삭제 완료: {removed_count}건"
+            )
+        else:
+            st.session_state["portfolio_delete_warning"] = "삭제할 대상이 없어 변경된 항목이 없습니다."
+        st.rerun()
+
     # GitHub 동기화가 켜진 경우, 입력 테이블 변경을 즉시 스냅샷/원격으로 반영한다.
     auto_sync_on_change = bool(st.session_state.get("github_sync_on_change", True))
-    if auto_sync_on_change and not final_df.empty:
+    if auto_sync_on_change:
         autosave_key = f"portfolio_autosave_hash::{selected_date.isoformat()}"
         hash_df = final_df.copy()
         hash_df[COL_NAME] = hash_df[COL_NAME].astype(str).str.strip()
