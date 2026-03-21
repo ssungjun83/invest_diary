@@ -7825,7 +7825,14 @@ def _get_runtime_api_settings() -> dict[str, str]:
     provider_source = "session/db:global_ai_provider"
 
     openai_key_direct, openai_key_direct_source = _read_first_secret_or_env_with_source(
-        ["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"]
+        [
+            "OPENAI_API_KEY",
+            "GLOBAL_OPENAI_API_KEY",
+            "CHATGPT_API_KEY",
+            "GLOBAL_CHATGPT_API_KEY",
+            "OPENAI_KEY",
+            "OPENAI_TOKEN",
+        ]
     )
     openai_key_session = str(st.session_state.get("global_openai_api_key", "") or "").strip()
     openai_key = openai_key_session or openai_key_direct
@@ -7834,7 +7841,16 @@ def _get_runtime_api_settings() -> dict[str, str]:
     )
 
     claude_key_direct, claude_key_direct_source = _read_first_secret_or_env_with_source(
-        ["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"]
+        [
+            "CLAUDE_API_KEY",
+            "GLOBAL_CLAUDE_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GLOBAL_ANTHROPIC_API_KEY",
+            "CLAUDE_KEY",
+            "CLAUDE_TOKEN",
+            "ANTHROPIC_KEY",
+            "ANTHROPIC_TOKEN",
+        ]
     )
     claude_key_session = str(st.session_state.get("global_claude_api_key", "") or "").strip()
     claude_key = claude_key_session or claude_key_direct
@@ -7843,7 +7859,13 @@ def _get_runtime_api_settings() -> dict[str, str]:
     )
 
     alpha_key_direct, alpha_key_direct_source = _read_first_secret_or_env_with_source(
-        ["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]
+        [
+            "ALPHA_VANTAGE_API_KEY",
+            "GLOBAL_ALPHA_VANTAGE_API_KEY",
+            "ALPHAVANTAGE_API_KEY",
+            "ALPHA_VANTAGE_KEY",
+            "ALPHA_KEY",
+        ]
     )
     alpha_key_session = str(st.session_state.get("global_alpha_vantage_api_key", "") or "").strip()
     alpha_key = alpha_key_session or alpha_key_direct
@@ -7852,7 +7874,7 @@ def _get_runtime_api_settings() -> dict[str, str]:
     )
 
     finnhub_key_direct, finnhub_key_direct_source = _read_first_secret_or_env_with_source(
-        ["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]
+        ["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY", "FINNHUB_KEY", "FINNHUB_TOKEN"]
     )
     finnhub_key_session = str(st.session_state.get("global_finnhub_api_key", "") or "").strip()
     finnhub_key = finnhub_key_session or finnhub_key_direct
@@ -8295,11 +8317,41 @@ def initialize_api_settings(force: bool = False) -> None:
     daily_auto_last_attempt_date = str(settings.get("daily_auto_snapshot_last_attempt_date", "") or "").strip()
     daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
-    # 2026-03-19 기준: 표준 secrets/env 키를 우선 사용하고, 없으면 DB 저장값을 쓴다.
-    openai_key_secret = _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"])
-    claude_key_secret = _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"])
-    alpha_key_secret = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"])
-    finnhub_key_secret = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"])
+    # 표준 키 + 별칭 키를 모두 허용한다.
+    openai_key_secret = _read_first_secret_or_env(
+        [
+            "OPENAI_API_KEY",
+            "GLOBAL_OPENAI_API_KEY",
+            "CHATGPT_API_KEY",
+            "GLOBAL_CHATGPT_API_KEY",
+            "OPENAI_KEY",
+            "OPENAI_TOKEN",
+        ]
+    )
+    claude_key_secret = _read_first_secret_or_env(
+        [
+            "CLAUDE_API_KEY",
+            "GLOBAL_CLAUDE_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GLOBAL_ANTHROPIC_API_KEY",
+            "CLAUDE_KEY",
+            "CLAUDE_TOKEN",
+            "ANTHROPIC_KEY",
+            "ANTHROPIC_TOKEN",
+        ]
+    )
+    alpha_key_secret = _read_first_secret_or_env(
+        [
+            "ALPHA_VANTAGE_API_KEY",
+            "GLOBAL_ALPHA_VANTAGE_API_KEY",
+            "ALPHAVANTAGE_API_KEY",
+            "ALPHA_VANTAGE_KEY",
+            "ALPHA_KEY",
+        ]
+    )
+    finnhub_key_secret = _read_first_secret_or_env(
+        ["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY", "FINNHUB_KEY", "FINNHUB_TOKEN"]
+    )
     global_provider = normalize_ai_provider(global_provider)
     global_openai_key = openai_key_secret or global_openai_key
     global_claude_key = claude_key_secret or global_claude_key
@@ -10446,6 +10498,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_new_company_ticker"] = ""
     if "analysis_new_company_sector" not in st.session_state:
         st.session_state["analysis_new_company_sector"] = ""
+    pending_new_company_fields = st.session_state.pop("analysis_new_company_fields_pending", None)
+    if isinstance(pending_new_company_fields, dict):
+        for key in ["analysis_new_company_name", "analysis_new_company_ticker", "analysis_new_company_sector"]:
+            if key in pending_new_company_fields:
+                st.session_state[key] = str(pending_new_company_fields.get(key) or "")
     if "analysis_watch_image_uploader_nonce" not in st.session_state:
         st.session_state["analysis_watch_image_uploader_nonce"] = 0
     if "analysis_watch_image_enrich_meta" not in st.session_state:
@@ -10485,7 +10542,9 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             )
             auto_ticker = clean_valid_ticker(auto_ticker)
             if auto_ticker:
-                st.session_state["analysis_new_company_ticker"] = auto_ticker
+                st.session_state["analysis_new_company_fields_pending"] = {
+                    "analysis_new_company_ticker": auto_ticker
+                }
                 st.session_state["analysis_new_company_ticker_notice"] = (
                     f"{lookup_name} 티커 자동 입력: {auto_ticker} ({auto_src or '자동 탐색'})"
                 )
@@ -10514,9 +10573,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
             if not resolved_sector:
                 resolved_sector = infer_sector_from_name_heuristic(new_name, new_ticker)
             upsert_company_list_entry(new_name, new_ticker, sector=resolved_sector, source="manual")
-            st.session_state["analysis_new_company_name"] = ""
-            st.session_state["analysis_new_company_ticker"] = ""
-            st.session_state["analysis_new_company_sector"] = ""
+            st.session_state["analysis_new_company_fields_pending"] = {
+                "analysis_new_company_name": "",
+                "analysis_new_company_ticker": "",
+                "analysis_new_company_sector": "",
+            }
             st.session_state["analysis_company_name_pending"] = new_name
             if new_ticker:
                 st.session_state["analysis_ticker_pending"] = new_ticker
