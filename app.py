@@ -4417,13 +4417,13 @@ def _build_value_chain_rows_brief_text(match_rows: list[dict], max_stage_segment
         return ""
 
     stage_order = {"업스트림": 0, "미드스트림": 1, "다운스트림": 2}
-    df["stage_order"] = df["stage"].map(stage_order).fillna(99)
     grouped = (
         df.groupby(["stage", "segment"], dropna=False)["input_company"]
         .apply(lambda s: sorted({str(v).strip() for v in s if str(v).strip()}))
         .reset_index()
-        .sort_values(["stage_order", "segment"])
     )
+    grouped["stage_order"] = grouped["stage"].map(stage_order).fillna(99)
+    grouped = grouped.sort_values(["stage_order", "segment"], kind="stable")
     lines = []
     for idx, row in grouped.head(max_stage_segments).iterrows():
         stage = str(row.get("stage") or "기타").strip() or "기타"
