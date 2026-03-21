@@ -1033,6 +1033,28 @@ def get_conn() -> sqlite3.Connection:
         conn.execute("ALTER TABLE company_list ADD COLUMN price_updated_at TEXT")
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS company_list_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_name TEXT NOT NULL,
+            ticker TEXT,
+            sector TEXT,
+            price_krw REAL,
+            price_source TEXT,
+            price_updated_at TEXT,
+            source TEXT,
+            action TEXT NOT NULL,
+            archived_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_company_list_archive_name_time
+        ON company_list_archive (stock_name, archived_at DESC)
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS company_compare_sets (
             set_name TEXT PRIMARY KEY,
             companies_json TEXT NOT NULL,
@@ -7134,6 +7156,48 @@ def parse_financial_summary_json(value: str | None) -> dict:
         return {}
 
 
+def _archive_company_list_state(
+    conn: sqlite3.Connection,
+    stock_name: str,
+    ticker: str = "",
+    sector: str = "",
+    price_krw: float | None = None,
+    price_source: str = "",
+    price_updated_at: str = "",
+    source: str = "",
+    action: str = "upsert",
+) -> None:
+    name = str(stock_name or "").strip()
+    if not name:
+        return
+    now_str = datetime.now().isoformat(timespec="seconds")
+    tkr = clean_valid_ticker(ticker)
+    sec = str(sector or "").strip()
+    p_src = str(price_source or "").strip()
+    p_upd = str(price_updated_at or "").strip()
+    src = str(source or "").strip()
+    act = str(action or "upsert").strip() or "upsert"
+    price_val = _safe_to_float(price_krw)
+    conn.execute(
+        """
+        INSERT INTO company_list_archive (
+            stock_name, ticker, sector, price_krw, price_source, price_updated_at, source, action, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            name,
+            tkr or None,
+            sec or None,
+            float(price_val) if price_val is not None else None,
+            p_src or None,
+            p_upd or None,
+            src or None,
+            act,
+            now_str,
+        ),
+    )
+
+
 def load_company_list() -> pd.DataFrame:
     conn = get_conn()
     try:
@@ -7323,6 +7387,19 @@ def upsert_company_list_entry(
             "SELECT ticker, sector, price_krw, price_source, source FROM company_list WHERE stock_name = ?",
             (name,),
         ).fetchone()
+        if not row:
+            archived = conn.execute(
+                """
+                SELECT ticker, sector, price_krw, price_source, source
+                FROM company_list_archive
+                WHERE stock_name = ?
+                ORDER BY archived_at DESC, id DESC
+                LIMIT 1
+                """,
+                (name,),
+            ).fetchone()
+            if archived:
+                row = archived
         existing_ticker = clean_valid_ticker((row[0] or "").strip().upper()) if row and row[0] else ""
         existing_sector = (row[1] or "").strip() if row and len(row) > 1 and row[1] else ""
         existing_price = _safe_to_float(row[2]) if row and len(row) > 2 else None
@@ -7388,6 +7465,17 @@ def upsert_company_list_entry(
                 now_str,
             ),
         )
+        _archive_company_list_state(
+            conn,
+            stock_name=name,
+            ticker=next_ticker,
+            sector=next_sector,
+            price_krw=next_price,
+            price_source=next_price_source,
+            price_updated_at=now_str if next_price is not None else "",
+            source=next_source or "",
+            action="upsert",
+        )
         conn.commit()
     finally:
         conn.close()
@@ -7399,6 +7487,22 @@ def delete_company_list_entry(stock_name: str) -> None:
         return
     conn = get_conn()
     try:
+        row = conn.execute(
+            "SELECT stock_name, ticker, sector, price_krw, price_source, price_updated_at, source FROM company_list WHERE stock_name = ?",
+            (name,),
+        ).fetchone()
+        if row:
+            _archive_company_list_state(
+                conn,
+                stock_name=str(row[0] or ""),
+                ticker=str(row[1] or ""),
+                sector=str(row[2] or ""),
+                price_krw=_safe_to_float(row[3]),
+                price_source=str(row[4] or ""),
+                price_updated_at=str(row[5] or ""),
+                source=str(row[6] or ""),
+                action="delete",
+            )
         conn.execute("DELETE FROM company_list WHERE stock_name = ?", (name,))
         conn.commit()
     finally:
@@ -7412,9 +7516,23 @@ def clear_company_list_ticker(stock_name: str, source: str = "manual_edit_clear"
     now_str = datetime.now().isoformat(timespec="seconds")
     conn = get_conn()
     try:
-        row = conn.execute("SELECT stock_name FROM company_list WHERE stock_name = ?", (name,)).fetchone()
+        row = conn.execute(
+            "SELECT stock_name, ticker, sector, price_krw, price_source, price_updated_at, source FROM company_list WHERE stock_name = ?",
+            (name,),
+        ).fetchone()
         if not row:
             return False
+        _archive_company_list_state(
+            conn,
+            stock_name=str(row[0] or ""),
+            ticker=str(row[1] or ""),
+            sector=str(row[2] or ""),
+            price_krw=_safe_to_float(row[3]),
+            price_source=str(row[4] or ""),
+            price_updated_at=str(row[5] or ""),
+            source=str(row[6] or ""),
+            action="clear_ticker_before",
+        )
         conn.execute(
             """
             UPDATE company_list
@@ -7464,6 +7582,21 @@ def clear_company_list_meta_all(source: str = "manual_meta_reset") -> int:
         total = int(row[0]) if row and row[0] is not None else 0
         if total <= 0:
             return 0
+        rows = conn.execute(
+            "SELECT stock_name, ticker, sector, price_krw, price_source, price_updated_at, source FROM company_list"
+        ).fetchall()
+        for arc in rows:
+            _archive_company_list_state(
+                conn,
+                stock_name=str(arc[0] or ""),
+                ticker=str(arc[1] or ""),
+                sector=str(arc[2] or ""),
+                price_krw=_safe_to_float(arc[3]),
+                price_source=str(arc[4] or ""),
+                price_updated_at=str(arc[5] or ""),
+                source=str(arc[6] or ""),
+                action="clear_meta_all_before",
+            )
         conn.execute(
             """
             UPDATE company_list
@@ -7507,6 +7640,26 @@ def clear_company_list_meta_by_names(stock_names: list[str], source: str = "manu
         total = int(row[0]) if row and row[0] is not None else 0
         if total <= 0:
             return 0
+        rows = conn.execute(
+            f"""
+            SELECT stock_name, ticker, sector, price_krw, price_source, price_updated_at, source
+            FROM company_list
+            WHERE stock_name IN ({placeholders})
+            """,
+            params,
+        ).fetchall()
+        for arc in rows:
+            _archive_company_list_state(
+                conn,
+                stock_name=str(arc[0] or ""),
+                ticker=str(arc[1] or ""),
+                sector=str(arc[2] or ""),
+                price_krw=_safe_to_float(arc[3]),
+                price_source=str(arc[4] or ""),
+                price_updated_at=str(arc[5] or ""),
+                source=str(arc[6] or ""),
+                action="clear_meta_selected_before",
+            )
 
         conn.execute(
             f"""
@@ -10762,6 +10915,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     )
 
     st.markdown("#### 기업 리스트 관리")
+    st.caption("안전 보관: 관심기업의 추가/수정/삭제 이력은 내부 아카이브에 자동 저장됩니다.")
     if "analysis_new_company_name" not in st.session_state:
         st.session_state["analysis_new_company_name"] = ""
     if "analysis_new_company_ticker" not in st.session_state:
