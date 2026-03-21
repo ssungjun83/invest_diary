@@ -10075,7 +10075,10 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     saved_cash_krw, saved_cash_usd = load_snapshot_cash(selected_date)
     st.caption(f"현재 저장 예수금: 원화 {saved_cash_krw:,.0f}원 / 달러 {format_usd(saved_cash_usd)}")
 
-    editor_state = st.session_state.get("portfolio_editor")
+    if "portfolio_editor_nonce" not in st.session_state:
+        st.session_state["portfolio_editor_nonce"] = 0
+    editor_key = f"portfolio_editor_{int(st.session_state.get('portfolio_editor_nonce', 0))}"
+    editor_state = st.session_state.get(editor_key)
     if isinstance(editor_state, pd.DataFrame):
         source_df = editor_state
     elif isinstance(editor_state, list):
@@ -10422,7 +10425,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         prepared_df,
         num_rows="dynamic",
         use_container_width=True,
-        key="portfolio_editor",
+        key=editor_key,
         column_config={
             COL_NAME: st.column_config.TextColumn(COL_NAME, required=True),
             COL_QTY: st.column_config.NumberColumn(COL_QTY, min_value=0, format="localized"),
@@ -10492,8 +10495,8 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         remained_df = final_df[~final_df[COL_NAME].astype(str).str.strip().isin(targets)].copy()
         removed_count = int(len(final_df) - len(remained_df))
         remained_df = ensure_portfolio_columns(remained_df, usd_krw_rate, force_usd_rate=True)
-        st.session_state["portfolio_editor"] = remained_df
         st.session_state["editing_df"] = remained_df
+        st.session_state["portfolio_editor_nonce"] = int(st.session_state.get("portfolio_editor_nonce", 0)) + 1
         st.session_state["portfolio_delete_targets"] = []
         if removed_count > 0:
             st.session_state["portfolio_delete_notice"] = (
