@@ -12274,6 +12274,31 @@ def delete_value_chain_from_db(chain_id: int) -> None:
         conn.close()
 
 
+def _extract_value_chain_terms(text: str) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    normalized = re.sub(r"[()\[\]{}<>|/,:;·]+", " ", raw)
+    normalized = normalized.replace("-", " ").replace("_", " ")
+    candidates: list[str] = []
+    candidates.extend(normalized.split())
+    candidates.extend(re.findall(r"[A-Za-z]{2,}[A-Za-z0-9]*", raw))
+    candidates.extend(re.findall(r"[가-힣]{2,}", raw))
+
+    dedup: list[str] = []
+    seen = set()
+    for token in candidates:
+        tk = str(token or "").strip().strip("\"'").strip()
+        if len(tk) < 2:
+            continue
+        key = tk.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(tk)
+    return dedup
+
+
 def build_value_chain_keyword_index(chain_data: dict) -> dict:
     """
     chain_data["rows"]의 단계·세부공정·기업명을 키워드로 인덱싱한다.
@@ -12286,6 +12311,30 @@ def build_value_chain_keyword_index(chain_data: dict) -> dict:
       }
     """
     idx: dict = {}
+    all_stages: list[str] = []
+    all_segments: list[str] = []
+    all_companies: list[str] = []
+
+    def _append_unique(items: list[str], value: str) -> None:
+        vv = str(value or "").strip()
+        if vv and vv not in items:
+            items.append(vv)
+
+    def _upsert_keyword(term: str, stage: str, segment: str, companies: list[str]) -> None:
+        keyword = str(term or "").strip()
+        if len(keyword) < 2:
+            return
+        existing = idx.get(keyword)
+        if isinstance(existing, dict) and existing.get("type") in {"stage", "segment", "company"}:
+            return
+        if not isinstance(existing, dict) or existing.get("type") != "keyword":
+            idx[keyword] = {"type": "keyword", "stages": [], "segments": [], "companies": []}
+        kw_ref = idx[keyword]
+        _append_unique(kw_ref["stages"], stage)
+        _append_unique(kw_ref["segments"], segment)
+        for comp in companies:
+            _append_unique(kw_ref["companies"], comp)
+
     rows = chain_data.get("rows") or []
     match_map: dict = {}
     for mr in (chain_data.get("matched_rows") or []):
@@ -12297,6 +12346,10 @@ def build_value_chain_keyword_index(chain_data: dict) -> dict:
         stage = str(row.get("stage") or "기타").strip()
         segment = str(row.get("segment") or "기타").strip()
         companies = [str(c).strip() for c in (row.get("companies") or []) if str(c).strip()]
+        _append_unique(all_stages, stage)
+        _append_unique(all_segments, segment)
+        for c in companies:
+            _append_unique(all_companies, c)
 
         if stage not in idx:
             idx[stage] = {"type": "stage", "companies": [], "segments": []}
@@ -12324,6 +12377,30 @@ def build_value_chain_keyword_index(chain_data: dict) -> dict:
                     "entries": [],
                 }
             idx[c]["entries"].append({"stage": stage, "segment": segment})
+
+        # 제품/원재료/공정 토큰까지 검색되도록 키워드 인덱스를 확장한다.
+        token_terms = _extract_value_chain_terms(stage) + _extract_value_chain_terms(segment)
+        for c in companies:
+            token_terms.extend(_extract_value_chain_terms(c))
+        for token in token_terms:
+            _upsert_keyword(token, stage, segment, companies)
+
+    chain_name = str(chain_data.get("chain_name") or "").strip()
+    if chain_name:
+        chain_terms = _extract_value_chain_terms(chain_name)
+        for token in chain_terms:
+            existing = idx.get(token)
+            if isinstance(existing, dict) and existing.get("type") in {"stage", "segment", "company"}:
+                continue
+            if not isinstance(existing, dict) or existing.get("type") != "keyword":
+                idx[token] = {"type": "keyword", "stages": [], "segments": [], "companies": []}
+            kw_ref = idx[token]
+            for stg in all_stages:
+                _append_unique(kw_ref["stages"], stg)
+            for seg in all_segments:
+                _append_unique(kw_ref["segments"], seg)
+            for comp in all_companies:
+                _append_unique(kw_ref["companies"], comp)
 
     return idx
 
@@ -12641,14 +12718,15 @@ def render_value_chain_tab() -> None:
         stage_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "stage")
         segment_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "segment")
         company_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "company")
+        keyword_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "keyword")
 
         st.markdown("##### 키워드 선택")
-        st.caption("단계·세부공정·기업명을 선택하면 연관된 기업과 밸류체인 위치를 확인할 수 있습니다.")
+        st.caption("단계·세부공정·기업명 + 제품/원재료/공정 키워드(예: LNG, 강관, 시추)를 선택해 탐색할 수 있습니다.")
         kw_type_col, kw_sel_col = st.columns([1, 2])
         with kw_type_col:
             kw_type_filter = st.radio(
                 "키워드 유형",
-                options=["전체", "단계", "세부공정", "기업"],
+                options=["전체", "단계", "세부공정", "기업", "키워드"],
                 horizontal=True,
                 key="value_chain_kw_type_filter",
             )
@@ -12659,12 +12737,14 @@ def render_value_chain_tab() -> None:
                 kw_pool = segment_kws
             elif kw_type_filter == "기업":
                 kw_pool = company_kws
+            elif kw_type_filter == "키워드":
+                kw_pool = keyword_kws
             else:
-                kw_pool = stage_kws + segment_kws + company_kws
+                kw_pool = stage_kws + segment_kws + company_kws + keyword_kws
             selected_kws = st.multiselect(
                 "키워드 선택 (복수 선택 가능)",
                 options=kw_pool,
-                placeholder="키워드를 선택하세요...",
+                placeholder="예: LNG, 강관, 시추",
                 key="value_chain_kw_select",
             )
         st.divider()
@@ -12778,6 +12858,28 @@ def render_value_chain_tab() -> None:
                                 peer_matched = peer_info.get("matched", False)
                                 peer_badge = "✅" if peer_matched else "○"
                                 st.markdown(f"{peer_badge} **{peer}**  \n`{peer_ticker or '-'}`")
+
+                elif kw_type == "keyword":
+                    rel_stages = [str(v) for v in (info.get("stages") or []) if str(v).strip()]
+                    rel_segments = [str(v) for v in (info.get("segments") or []) if str(v).strip()]
+                    rel_companies = [str(v) for v in (info.get("companies") or []) if str(v).strip()]
+                    st.caption(
+                        f"키워드 매칭 | 단계 {len(rel_stages)}개 · 세부공정 {len(rel_segments)}개 · 기업 {len(rel_companies)}개"
+                    )
+                    if rel_stages:
+                        st.markdown(f"**연관 단계:** {', '.join(rel_stages)}")
+                    if rel_segments:
+                        st.markdown(f"**연관 세부공정:** {', '.join(rel_segments)}")
+                    if rel_companies:
+                        st.markdown("**연관 기업:**")
+                        co_cols = st.columns(min(4, max(1, len(rel_companies))))
+                        for i, co in enumerate(rel_companies):
+                            co_info = kw_idx.get(co, {})
+                            with co_cols[i % len(co_cols)]:
+                                ticker = str(co_info.get("ticker") or "").strip() if isinstance(co_info, dict) else ""
+                                is_matched = bool(co_info.get("matched")) if isinstance(co_info, dict) else False
+                                badge = "✅" if is_matched else "○"
+                                st.markdown(f"{badge} **{co}**  \n`{ticker or '-'}`")
 
                 st.divider()
 
