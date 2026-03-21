@@ -1821,7 +1821,10 @@ def load_history(as_of_date: date | None = None) -> pd.DataFrame:
 
     hist_df["is_actual_snapshot"] = True
     start_ts = pd.Timestamp(hist_df["snapshot_date"].min()).normalize()
-    target_end_ts = pd.Timestamp(as_of_date or date.today()).normalize()
+    today_ts = pd.Timestamp(date.today()).normalize()
+    anchor_ts = pd.Timestamp(as_of_date).normalize() if as_of_date is not None else today_ts
+    # 오늘 날짜는 수동 저장(실제 스냅샷) 전까지 자동 승계 생성하지 않는다.
+    target_end_ts = anchor_ts if anchor_ts < today_ts else (today_ts - pd.Timedelta(days=1))
     last_ts = pd.Timestamp(hist_df["snapshot_date"].max()).normalize()
     if target_end_ts < last_ts:
         target_end_ts = last_ts
