@@ -4328,8 +4328,9 @@ def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
         return None
 
     stage_order = ["업스트림", "미드스트림", "다운스트림"]
-    df["stage_order"] = df["stage"].apply(lambda s: stage_order.index(s) if s in stage_order else 99)
-    df = df.sort_values(["stage_order", "segment", "input_company"]).copy()
+    stage_rank_map = {name: idx for idx, name in enumerate(stage_order)}
+    df["stage_rank"] = df["stage"].map(stage_rank_map).fillna(99).astype(int)
+    df = df.sort_values(["stage_rank", "segment", "input_company"], kind="stable").copy()
 
     nodes: list[str] = []
     node_index: dict[str, int] = {}
@@ -4347,7 +4348,12 @@ def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
 
     stage_color = {"업스트림": "#2563eb", "미드스트림": "#0f766e", "다운스트림": "#ea580c", "기타": "#64748b"}
 
-    stage_seg_counts = df.groupby(["stage", "segment"]).size().reset_index(name="cnt")
+    stage_seg_counts = (
+        df.groupby(["stage_rank", "stage", "segment"], dropna=False, sort=False)
+        .size()
+        .reset_index(name="cnt")
+        .sort_values(["stage_rank", "segment"], kind="stable")
+    )
     for _, r in stage_seg_counts.iterrows():
         s = str(r["stage"])
         seg = f"{s} | {str(r['segment'])}"
@@ -4356,7 +4362,12 @@ def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
         links_value.append(float(r["cnt"]))
         links_color.append("rgba(148,163,184,0.35)")
 
-    seg_company_counts = df.groupby(["stage", "segment", "input_company", "matched"]).size().reset_index(name="cnt")
+    seg_company_counts = (
+        df.groupby(["stage_rank", "stage", "segment", "input_company", "matched"], dropna=False, sort=False)
+        .size()
+        .reset_index(name="cnt")
+        .sort_values(["stage_rank", "segment", "input_company"], kind="stable")
+    )
     for _, r in seg_company_counts.iterrows():
         s = str(r["stage"])
         seg = f"{s} | {str(r['segment'])}"
