@@ -12254,6 +12254,42 @@ def load_value_chain_list_from_db() -> list:
         conn.close()
 
 
+def load_value_chain_payloads_from_db() -> list[dict]:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, chain_name, chain_data_json, created_at, updated_at FROM value_chain_store ORDER BY updated_at DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    payloads: list[dict] = []
+    for row in rows:
+        chain_id = int(row[0])
+        chain_name = str(row[1] or "").strip() or "밸류체인"
+        raw_json = str(row[2] or "").strip()
+        chain_data: dict = {}
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+                if isinstance(parsed, dict):
+                    chain_data = parsed
+            except Exception:
+                chain_data = {}
+        if not chain_data.get("chain_name"):
+            chain_data["chain_name"] = chain_name
+        payloads.append(
+            {
+                "id": chain_id,
+                "chain_name": chain_name,
+                "chain_data": chain_data,
+                "created_at": str(row[3] or "").strip(),
+                "updated_at": str(row[4] or "").strip(),
+            }
+        )
+    return payloads
+
+
 def load_value_chain_by_id_from_db(chain_id: int) -> dict:
     conn = get_conn()
     try:
@@ -12297,6 +12333,12 @@ def _extract_value_chain_terms(text: str) -> list[str]:
         seen.add(key)
         dedup.append(tk)
     return dedup
+
+
+def _append_unique_text(items: list[str], value: str) -> None:
+    vv = str(value or "").strip()
+    if vv and vv not in items:
+        items.append(vv)
 
 
 def build_value_chain_keyword_index(chain_data: dict) -> dict:
@@ -12351,22 +12393,29 @@ def build_value_chain_keyword_index(chain_data: dict) -> dict:
         for c in companies:
             _append_unique(all_companies, c)
 
-        if stage not in idx:
+        stage_entry = idx.get(stage)
+        if not isinstance(stage_entry, dict) or str(stage_entry.get("type") or "") != "stage":
             idx[stage] = {"type": "stage", "companies": [], "segments": []}
-        if segment not in idx[stage]["segments"]:
-            idx[stage]["segments"].append(segment)
+        stage_entry = idx[stage]
+        if segment not in stage_entry["segments"]:
+            stage_entry["segments"].append(segment)
         for c in companies:
-            if c not in idx[stage]["companies"]:
-                idx[stage]["companies"].append(c)
+            if c not in stage_entry["companies"]:
+                stage_entry["companies"].append(c)
 
-        if segment not in idx:
+        seg_entry = idx.get(segment)
+        if not isinstance(seg_entry, dict) or str(seg_entry.get("type") or "") != "segment":
             idx[segment] = {"type": "segment", "stage": stage, "companies": []}
+        seg_entry = idx[segment]
+        if not str(seg_entry.get("stage") or "").strip():
+            seg_entry["stage"] = stage
         for c in companies:
-            if c not in idx[segment]["companies"]:
-                idx[segment]["companies"].append(c)
+            if c not in seg_entry["companies"]:
+                seg_entry["companies"].append(c)
 
         for c in companies:
-            if c not in idx:
+            comp_entry = idx.get(c)
+            if not isinstance(comp_entry, dict) or str(comp_entry.get("type") or "") != "company":
                 mr_info = match_map.get(c, {})
                 idx[c] = {
                     "type": "company",
@@ -12376,7 +12425,10 @@ def build_value_chain_keyword_index(chain_data: dict) -> dict:
                     "matched_company": str(mr_info.get("matched_company") or "").strip(),
                     "entries": [],
                 }
-            idx[c]["entries"].append({"stage": stage, "segment": segment})
+            comp_entry = idx[c]
+            if "entries" not in comp_entry or not isinstance(comp_entry.get("entries"), list):
+                comp_entry["entries"] = []
+            comp_entry["entries"].append({"stage": stage, "segment": segment})
 
         # 제품/원재료/공정 토큰까지 검색되도록 키워드 인덱스를 확장한다.
         token_terms = _extract_value_chain_terms(stage) + _extract_value_chain_terms(segment)
@@ -12403,6 +12455,111 @@ def build_value_chain_keyword_index(chain_data: dict) -> dict:
                 _append_unique(kw_ref["companies"], comp)
 
     return idx
+
+
+def build_value_chain_global_keyword_index(chain_records: list[dict]) -> dict:
+    """
+    저장된 모든 밸류체인의 로컬 키워드 인덱스를 합쳐
+    키워드 -> 체인별 연결 정보 맵을 생성한다.
+    """
+    merged: dict = {}
+    for rec in chain_records:
+        chain_id = int(rec.get("id") or 0)
+        chain_name = str(rec.get("chain_name") or "밸류체인").strip() or "밸류체인"
+        chain_data = rec.get("chain_data") if isinstance(rec.get("chain_data"), dict) else {}
+        local_idx = build_value_chain_keyword_index(chain_data)
+        local_company_map = {
+            k: v
+            for k, v in local_idx.items()
+            if isinstance(v, dict) and str(v.get("type") or "") == "company"
+        }
+
+        for kw, info in local_idx.items():
+            if not isinstance(info, dict):
+                continue
+            keyword = str(kw or "").strip()
+            if not keyword:
+                continue
+            info_type = str(info.get("type") or "keyword").strip() or "keyword"
+
+            entry = merged.setdefault(
+                keyword,
+                {
+                    "type": "global_keyword",
+                    "types": [],
+                    "chains": [],
+                    "by_chain": {},
+                },
+            )
+            _append_unique_text(entry["types"], info_type)
+            _append_unique_text(entry["chains"], chain_name)
+
+            chain_entry = entry["by_chain"].setdefault(
+                chain_name,
+                {
+                    "chain_id": chain_id,
+                    "chain_name": chain_name,
+                    "types": [],
+                    "stages": [],
+                    "segments": [],
+                    "companies": [],
+                    "matched_companies": [],
+                    "company_meta": {},
+                },
+            )
+            _append_unique_text(chain_entry["types"], info_type)
+
+            def _upsert_company(company_name: str) -> None:
+                comp = str(company_name or "").strip()
+                if not comp:
+                    return
+                _append_unique_text(chain_entry["companies"], comp)
+                src = local_company_map.get(comp, {})
+                meta = chain_entry["company_meta"].setdefault(
+                    comp,
+                    {"ticker": "", "sector": "", "matched": False, "matched_company": ""},
+                )
+                if isinstance(src, dict):
+                    ticker = str(src.get("ticker") or "").strip()
+                    sector = str(src.get("sector") or "").strip()
+                    matched = bool(src.get("matched"))
+                    matched_company = str(src.get("matched_company") or "").strip()
+                    if ticker and not meta["ticker"]:
+                        meta["ticker"] = ticker
+                    if sector and not meta["sector"]:
+                        meta["sector"] = sector
+                    if matched:
+                        meta["matched"] = True
+                        _append_unique_text(chain_entry["matched_companies"], comp)
+                    if matched_company and not meta["matched_company"]:
+                        meta["matched_company"] = matched_company
+
+            if info_type == "stage":
+                _append_unique_text(chain_entry["stages"], keyword)
+                for seg in (info.get("segments") or []):
+                    _append_unique_text(chain_entry["segments"], seg)
+                for comp in (info.get("companies") or []):
+                    _upsert_company(comp)
+            elif info_type == "segment":
+                _append_unique_text(chain_entry["segments"], keyword)
+                _append_unique_text(chain_entry["stages"], str(info.get("stage") or "").strip())
+                for comp in (info.get("companies") or []):
+                    _upsert_company(comp)
+            elif info_type == "company":
+                for ent in (info.get("entries") or []):
+                    if isinstance(ent, dict):
+                        _append_unique_text(chain_entry["stages"], str(ent.get("stage") or "").strip())
+                        _append_unique_text(chain_entry["segments"], str(ent.get("segment") or "").strip())
+                _upsert_company(keyword)
+            else:
+                for stg in (info.get("stages") or []):
+                    _append_unique_text(chain_entry["stages"], stg)
+                for seg in (info.get("segments") or []):
+                    _append_unique_text(chain_entry["segments"], seg)
+                for comp in (info.get("companies") or []):
+                    _upsert_company(comp)
+
+    return merged
 
 
 def render_value_chain_tab() -> None:
@@ -12714,14 +12871,41 @@ def render_value_chain_tab() -> None:
 
     # ────────────────────── 키워드 탐색 ─────────────────────────────────────
     with kw_tab:
-        kw_idx = build_value_chain_keyword_index(result)
-        stage_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "stage")
-        segment_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "segment")
-        company_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "company")
-        keyword_kws = sorted(k for k, v in kw_idx.items() if v["type"] == "keyword")
+        local_kw_idx = build_value_chain_keyword_index(result)
+        db_chain_records = load_value_chain_payloads_from_db()
+        global_kw_idx = build_value_chain_global_keyword_index(db_chain_records)
+
+        scope_options = ["전체 밸류체인(기본)", "현재 선택 체인"]
+        kw_scope = st.radio(
+            "검색 범위",
+            options=scope_options,
+            horizontal=True,
+            index=0,
+            key="value_chain_kw_scope",
+        )
+
+        use_global_scope = kw_scope == "전체 밸류체인(기본)"
+        kw_idx = global_kw_idx if (use_global_scope and global_kw_idx) else local_kw_idx
+
+        def _has_kw_type(info_obj: dict, target: str) -> bool:
+            if not isinstance(info_obj, dict):
+                return False
+            if str(info_obj.get("type") or "") == target:
+                return True
+            return target in [str(v) for v in (info_obj.get("types") or [])]
+
+        stage_kws = sorted(k for k, v in kw_idx.items() if _has_kw_type(v, "stage"))
+        segment_kws = sorted(k for k, v in kw_idx.items() if _has_kw_type(v, "segment"))
+        company_kws = sorted(k for k, v in kw_idx.items() if _has_kw_type(v, "company"))
+        keyword_kws = sorted(k for k, v in kw_idx.items() if _has_kw_type(v, "keyword"))
 
         st.markdown("##### 키워드 선택")
-        st.caption("단계·세부공정·기업명 + 제품/원재료/공정 키워드(예: LNG, 강관, 시추)를 선택해 탐색할 수 있습니다.")
+        st.caption(
+            "저장된 전체 밸류체인에서 단계·세부공정·기업명 + 제품/원재료/공정 키워드"
+            "(예: LNG, 강관, 시추)를 통합 탐색합니다."
+            if use_global_scope
+            else "현재 선택 체인에서 단계·세부공정·기업명 + 제품/원재료/공정 키워드를 탐색합니다."
+        )
         kw_type_col, kw_sel_col = st.columns([1, 2])
         with kw_type_col:
             kw_type_filter = st.radio(
@@ -12749,139 +12933,220 @@ def render_value_chain_tab() -> None:
             )
         st.divider()
 
-        if not selected_kws:
-            for stage_nm in stage_kws:
-                info = kw_idx.get(stage_nm, {})
-                segs = info.get("segments", [])
-                companies_in_stage = info.get("companies", [])
-                with st.expander(
-                    f"**{stage_nm}** — 세부공정 {len(segs)}개 / 기업 {len(companies_in_stage)}개",
-                    expanded=True,
-                ):
-                    if not segs:
-                        st.caption("세부공정 정보 없음")
+        if use_global_scope:
+            if not selected_kws:
+                summary_rows = []
+                for kw_name, kw_info in kw_idx.items():
+                    if not isinstance(kw_info, dict):
                         continue
-                    seg_disp_cols = st.columns(max(1, min(4, len(segs))))
-                    for i, seg in enumerate(segs):
-                        seg_info = kw_idx.get(seg, {})
-                        seg_companies = seg_info.get("companies", [])
-                        with seg_disp_cols[i % len(seg_disp_cols)]:
-                            st.markdown(f"**{seg}**")
-                            for co in seg_companies:
-                                co_info = kw_idx.get(co, {})
-                                ticker = co_info.get("ticker", "")
-                                is_matched = co_info.get("matched", False)
-                                badge = "✅" if is_matched else "○"
-                                ticker_str = f" `{ticker}`" if ticker else ""
-                                st.markdown(f"{badge} {co}{ticker_str}")
-        else:
-            for kw in selected_kws:
-                info = kw_idx.get(kw)
-                if info is None:
-                    continue
-                kw_type = info["type"]
-                st.markdown(f"### 🔍 {kw}")
-
-                if kw_type == "stage":
-                    segs = info.get("segments", [])
-                    companies_in_kw = info.get("companies", [])
-                    st.caption(f"단계 키워드 | 세부공정: {', '.join(segs)}")
-                    if companies_in_kw:
-                        co_cols = st.columns(min(4, max(1, len(companies_in_kw))))
-                        for i, co in enumerate(companies_in_kw):
-                            co_info = kw_idx.get(co, {})
-                            with co_cols[i % len(co_cols)]:
-                                ticker = co_info.get("ticker", "")
-                                is_matched = co_info.get("matched", False)
-                                matched_nm = co_info.get("matched_company", "")
-                                entries = co_info.get("entries", [])
-                                seg_label = entries[0]["segment"] if entries else ""
-                                badge = "✅ 관심기업" if is_matched else ""
-                                extra = f"\n매칭명: {matched_nm}" if (is_matched and matched_nm and matched_nm != co) else ""
-                                st.markdown(
-                                    f"**{co}**  \n{badge}  \n"
-                                    f"티커: `{ticker or '-'}`  \n"
-                                    f"세부공정: {seg_label}{extra}"
-                                )
-
-                elif kw_type == "segment":
-                    stage_label = info.get("stage", "")
-                    companies_in_kw = info.get("companies", [])
-                    st.caption(f"세부공정 키워드 | 소속 단계: {stage_label} | 기업 {len(companies_in_kw)}개")
-                    if companies_in_kw:
-                        co_cols = st.columns(min(4, max(1, len(companies_in_kw))))
-                        for i, co in enumerate(companies_in_kw):
-                            co_info = kw_idx.get(co, {})
-                            with co_cols[i % len(co_cols)]:
-                                ticker = co_info.get("ticker", "")
-                                is_matched = co_info.get("matched", False)
-                                matched_nm = co_info.get("matched_company", "")
-                                badge = "✅ 관심기업" if is_matched else ""
-                                extra = f"\n매칭명: {matched_nm}" if (is_matched and matched_nm and matched_nm != co) else ""
-                                st.markdown(
-                                    f"**{co}**  \n{badge}  \n"
-                                    f"티커: `{ticker or '-'}`{extra}"
-                                )
-
-                elif kw_type == "company":
-                    ticker = info.get("ticker", "")
-                    sector = info.get("sector", "")
-                    is_matched = info.get("matched", False)
-                    matched_nm = info.get("matched_company", "")
-                    entries = info.get("entries", [])
-                    badge = "✅ 관심기업 매칭" if is_matched else "○ 미매칭"
-                    caption_parts = [badge]
-                    if is_matched and matched_nm and matched_nm != kw:
-                        caption_parts.append(f"→ {matched_nm}")
-                    if ticker:
-                        caption_parts.append(f"티커: {ticker}")
-                    if sector:
-                        caption_parts.append(f"섹터: {sector}")
-                    st.caption(" | ".join(caption_parts))
-                    if entries:
-                        st.markdown("**밸류체인 내 위치:**")
-                        for e in entries:
-                            st.markdown(f"- {e['stage']} > **{e['segment']}**")
-                    peer_companies: list = []
-                    for e in entries:
-                        seg_info = kw_idx.get(e["segment"], {})
-                        for peer in seg_info.get("companies", []):
-                            if peer != kw and peer not in peer_companies:
-                                peer_companies.append(peer)
-                    if peer_companies:
-                        st.markdown("**같은 세부공정의 경쟁/동반 기업:**")
-                        peer_cols = st.columns(min(4, max(1, len(peer_companies))))
-                        for i, peer in enumerate(peer_companies):
-                            peer_info = kw_idx.get(peer, {})
-                            with peer_cols[i % len(peer_cols)]:
-                                peer_ticker = peer_info.get("ticker", "")
-                                peer_matched = peer_info.get("matched", False)
-                                peer_badge = "✅" if peer_matched else "○"
-                                st.markdown(f"{peer_badge} **{peer}**  \n`{peer_ticker or '-'}`")
-
-                elif kw_type == "keyword":
-                    rel_stages = [str(v) for v in (info.get("stages") or []) if str(v).strip()]
-                    rel_segments = [str(v) for v in (info.get("segments") or []) if str(v).strip()]
-                    rel_companies = [str(v) for v in (info.get("companies") or []) if str(v).strip()]
-                    st.caption(
-                        f"키워드 매칭 | 단계 {len(rel_stages)}개 · 세부공정 {len(rel_segments)}개 · 기업 {len(rel_companies)}개"
+                    chain_hits = kw_info.get("by_chain") or {}
+                    if not isinstance(chain_hits, dict):
+                        continue
+                    linked_company_count = 0
+                    for cinfo in chain_hits.values():
+                        if isinstance(cinfo, dict):
+                            linked_company_count += len(cinfo.get("companies") or [])
+                    summary_rows.append(
+                        {
+                            "키워드": kw_name,
+                            "연결 체인수": len(chain_hits),
+                            "연관 기업수": linked_company_count,
+                            "유형": ", ".join(str(v) for v in (kw_info.get("types") or []) if str(v).strip()),
+                        }
                     )
-                    if rel_stages:
-                        st.markdown(f"**연관 단계:** {', '.join(rel_stages)}")
-                    if rel_segments:
-                        st.markdown(f"**연관 세부공정:** {', '.join(rel_segments)}")
-                    if rel_companies:
-                        st.markdown("**연관 기업:**")
-                        co_cols = st.columns(min(4, max(1, len(rel_companies))))
-                        for i, co in enumerate(rel_companies):
-                            co_info = kw_idx.get(co, {})
-                            with co_cols[i % len(co_cols)]:
-                                ticker = str(co_info.get("ticker") or "").strip() if isinstance(co_info, dict) else ""
-                                is_matched = bool(co_info.get("matched")) if isinstance(co_info, dict) else False
-                                badge = "✅" if is_matched else "○"
-                                st.markdown(f"{badge} **{co}**  \n`{ticker or '-'}`")
+                if summary_rows:
+                    summary_df = pd.DataFrame(summary_rows).sort_values(
+                        ["연결 체인수", "연관 기업수", "키워드"],
+                        ascending=[False, False, True],
+                    )
+                    st.caption("전체 밸류체인 키워드 연결 요약 (옵시디언 지식맵처럼 연결도 높은 키워드 우선)")
+                    st.dataframe(
+                        format_table_numbers(summary_df.head(200)),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("저장된 밸류체인이 없어 전체 키워드 지도를 생성할 수 없습니다.")
+            else:
+                for kw in selected_kws:
+                    info = kw_idx.get(kw)
+                    if not isinstance(info, dict):
+                        continue
+                    st.markdown(f"### 🔍 {kw}")
+                    type_text = ", ".join(str(v) for v in (info.get("types") or []) if str(v).strip()) or "-"
+                    by_chain = info.get("by_chain") or {}
+                    if not isinstance(by_chain, dict):
+                        by_chain = {}
+                    st.caption(f"유형: {type_text} | 연결 체인: {len(by_chain)}개")
 
-                st.divider()
+                    if not by_chain:
+                        st.caption("연결된 체인이 없습니다.")
+                        st.divider()
+                        continue
+
+                    for chain_nm in sorted(by_chain.keys()):
+                        cinfo = by_chain.get(chain_nm) or {}
+                        stages = [str(v) for v in (cinfo.get("stages") or []) if str(v).strip()]
+                        segments = [str(v) for v in (cinfo.get("segments") or []) if str(v).strip()]
+                        companies = [str(v) for v in (cinfo.get("companies") or []) if str(v).strip()]
+                        matched_companies = [str(v) for v in (cinfo.get("matched_companies") or []) if str(v).strip()]
+                        header = (
+                            f"{chain_nm} | 단계 {len(stages)}개 · 세부공정 {len(segments)}개 · "
+                            f"기업 {len(companies)}개(매칭 {len(matched_companies)}개)"
+                        )
+                        with st.expander(header, expanded=False):
+                            if stages:
+                                st.markdown(f"**연관 단계:** {', '.join(stages)}")
+                            if segments:
+                                st.markdown(f"**연관 세부공정:** {', '.join(segments)}")
+                            if companies:
+                                st.markdown("**연관 기업:**")
+                                co_cols = st.columns(min(4, max(1, len(companies))))
+                                company_meta = cinfo.get("company_meta") if isinstance(cinfo.get("company_meta"), dict) else {}
+                                for i, co in enumerate(companies):
+                                    meta = company_meta.get(co, {}) if isinstance(company_meta, dict) else {}
+                                    with co_cols[i % len(co_cols)]:
+                                        ticker = str(meta.get("ticker") or "").strip() if isinstance(meta, dict) else ""
+                                        matched = bool(meta.get("matched")) if isinstance(meta, dict) else False
+                                        matched_name = str(meta.get("matched_company") or "").strip() if isinstance(meta, dict) else ""
+                                        badge = "✅" if matched else "○"
+                                        extra = f"  \n매칭명: {matched_name}" if matched_name and matched_name != co else ""
+                                        st.markdown(f"{badge} **{co}**  \n`{ticker or '-'}`{extra}")
+                    st.divider()
+        else:
+            if not selected_kws:
+                for stage_nm in stage_kws:
+                    info = kw_idx.get(stage_nm, {})
+                    segs = info.get("segments", [])
+                    companies_in_stage = info.get("companies", [])
+                    with st.expander(
+                        f"**{stage_nm}** — 세부공정 {len(segs)}개 / 기업 {len(companies_in_stage)}개",
+                        expanded=True,
+                    ):
+                        if not segs:
+                            st.caption("세부공정 정보 없음")
+                            continue
+                        seg_disp_cols = st.columns(max(1, min(4, len(segs))))
+                        for i, seg in enumerate(segs):
+                            seg_info = kw_idx.get(seg, {})
+                            seg_companies = seg_info.get("companies", [])
+                            with seg_disp_cols[i % len(seg_disp_cols)]:
+                                st.markdown(f"**{seg}**")
+                                for co in seg_companies:
+                                    co_info = kw_idx.get(co, {})
+                                    ticker = co_info.get("ticker", "")
+                                    is_matched = co_info.get("matched", False)
+                                    badge = "✅" if is_matched else "○"
+                                    ticker_str = f" `{ticker}`" if ticker else ""
+                                    st.markdown(f"{badge} {co}{ticker_str}")
+            else:
+                for kw in selected_kws:
+                    info = kw_idx.get(kw)
+                    if info is None:
+                        continue
+                    kw_type = str(info.get("type") or "")
+                    st.markdown(f"### 🔍 {kw}")
+
+                    if kw_type == "stage":
+                        segs = info.get("segments", [])
+                        companies_in_kw = info.get("companies", [])
+                        st.caption(f"단계 키워드 | 세부공정: {', '.join(segs)}")
+                        if companies_in_kw:
+                            co_cols = st.columns(min(4, max(1, len(companies_in_kw))))
+                            for i, co in enumerate(companies_in_kw):
+                                co_info = kw_idx.get(co, {})
+                                with co_cols[i % len(co_cols)]:
+                                    ticker = co_info.get("ticker", "")
+                                    is_matched = co_info.get("matched", False)
+                                    matched_nm = co_info.get("matched_company", "")
+                                    entries = co_info.get("entries", [])
+                                    seg_label = entries[0]["segment"] if entries else ""
+                                    badge = "✅ 관심기업" if is_matched else ""
+                                    extra = f"\n매칭명: {matched_nm}" if (is_matched and matched_nm and matched_nm != co) else ""
+                                    st.markdown(
+                                        f"**{co}**  \n{badge}  \n"
+                                        f"티커: `{ticker or '-'}`  \n"
+                                        f"세부공정: {seg_label}{extra}"
+                                    )
+
+                    elif kw_type == "segment":
+                        stage_label = info.get("stage", "")
+                        companies_in_kw = info.get("companies", [])
+                        st.caption(f"세부공정 키워드 | 소속 단계: {stage_label} | 기업 {len(companies_in_kw)}개")
+                        if companies_in_kw:
+                            co_cols = st.columns(min(4, max(1, len(companies_in_kw))))
+                            for i, co in enumerate(companies_in_kw):
+                                co_info = kw_idx.get(co, {})
+                                with co_cols[i % len(co_cols)]:
+                                    ticker = co_info.get("ticker", "")
+                                    is_matched = co_info.get("matched", False)
+                                    matched_nm = co_info.get("matched_company", "")
+                                    badge = "✅ 관심기업" if is_matched else ""
+                                    extra = f"\n매칭명: {matched_nm}" if (is_matched and matched_nm and matched_nm != co) else ""
+                                    st.markdown(
+                                        f"**{co}**  \n{badge}  \n"
+                                        f"티커: `{ticker or '-'}`{extra}"
+                                    )
+
+                    elif kw_type == "company":
+                        ticker = info.get("ticker", "")
+                        sector = info.get("sector", "")
+                        is_matched = info.get("matched", False)
+                        matched_nm = info.get("matched_company", "")
+                        entries = info.get("entries", [])
+                        badge = "✅ 관심기업 매칭" if is_matched else "○ 미매칭"
+                        caption_parts = [badge]
+                        if is_matched and matched_nm and matched_nm != kw:
+                            caption_parts.append(f"→ {matched_nm}")
+                        if ticker:
+                            caption_parts.append(f"티커: {ticker}")
+                        if sector:
+                            caption_parts.append(f"섹터: {sector}")
+                        st.caption(" | ".join(caption_parts))
+                        if entries:
+                            st.markdown("**밸류체인 내 위치:**")
+                            for e in entries:
+                                st.markdown(f"- {e['stage']} > **{e['segment']}**")
+                        peer_companies: list = []
+                        for e in entries:
+                            seg_info = kw_idx.get(e["segment"], {})
+                            for peer in seg_info.get("companies", []):
+                                if peer != kw and peer not in peer_companies:
+                                    peer_companies.append(peer)
+                        if peer_companies:
+                            st.markdown("**같은 세부공정의 경쟁/동반 기업:**")
+                            peer_cols = st.columns(min(4, max(1, len(peer_companies))))
+                            for i, peer in enumerate(peer_companies):
+                                peer_info = kw_idx.get(peer, {})
+                                with peer_cols[i % len(peer_cols)]:
+                                    peer_ticker = peer_info.get("ticker", "")
+                                    peer_matched = peer_info.get("matched", False)
+                                    peer_badge = "✅" if peer_matched else "○"
+                                    st.markdown(f"{peer_badge} **{peer}**  \n`{peer_ticker or '-'}`")
+
+                    elif kw_type == "keyword":
+                        rel_stages = [str(v) for v in (info.get("stages") or []) if str(v).strip()]
+                        rel_segments = [str(v) for v in (info.get("segments") or []) if str(v).strip()]
+                        rel_companies = [str(v) for v in (info.get("companies") or []) if str(v).strip()]
+                        st.caption(
+                            f"키워드 매칭 | 단계 {len(rel_stages)}개 · 세부공정 {len(rel_segments)}개 · 기업 {len(rel_companies)}개"
+                        )
+                        if rel_stages:
+                            st.markdown(f"**연관 단계:** {', '.join(rel_stages)}")
+                        if rel_segments:
+                            st.markdown(f"**연관 세부공정:** {', '.join(rel_segments)}")
+                        if rel_companies:
+                            st.markdown("**연관 기업:**")
+                            co_cols = st.columns(min(4, max(1, len(rel_companies))))
+                            for i, co in enumerate(rel_companies):
+                                co_info = kw_idx.get(co, {})
+                                with co_cols[i % len(co_cols)]:
+                                    ticker = str(co_info.get("ticker") or "").strip() if isinstance(co_info, dict) else ""
+                                    is_matched = bool(co_info.get("matched")) if isinstance(co_info, dict) else False
+                                    badge = "✅" if is_matched else "○"
+                                    st.markdown(f"{badge} **{co}**  \n`{ticker or '-'}`")
+
+                    st.divider()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
