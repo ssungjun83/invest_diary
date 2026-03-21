@@ -6260,6 +6260,13 @@ def _sanitize_widget_text(value, default: str = "") -> str:
     return text
 
 
+def _normalize_secret_like_value(value) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and ((text[0] == text[-1] == '"') or (text[0] == text[-1] == "'")):
+        text = text[1:-1].strip()
+    return text
+
+
 def _read_first_secret_or_env(keys: list[str]) -> str:
     for key in keys:
         value = ""
@@ -6272,18 +6279,50 @@ def _read_first_secret_or_env(keys: list[str]) -> str:
             key_variants.append(lower_key)
         for key_variant in key_variants:
             try:
-                value = str(st.secrets.get(key_variant, "") or "").strip()
+                value = _normalize_secret_like_value(st.secrets.get(key_variant, ""))
             except Exception:
                 value = ""
             if value:
                 break
         if not value:
             for key_variant in key_variants:
-                value = str(os.getenv(key_variant, "") or "").strip()
+                value = _normalize_secret_like_value(os.getenv(key_variant, ""))
                 if value:
                     break
         if value:
             return value
+    return ""
+
+
+def _read_secret_block_value(block_names: list[str], keys: list[str]) -> str:
+    for block_name in block_names:
+        block = {}
+        try:
+            maybe = st.secrets.get(block_name, {})
+            if isinstance(maybe, dict):
+                block = maybe
+            else:
+                try:
+                    block = dict(maybe)
+                except Exception:
+                    block = {}
+        except Exception:
+            block = {}
+        if not block:
+            continue
+
+        for key in keys:
+            key_variants = [str(key or "").strip()]
+            upper_key = key_variants[0].upper()
+            lower_key = key_variants[0].lower()
+            if upper_key and upper_key not in key_variants:
+                key_variants.append(upper_key)
+            if lower_key and lower_key not in key_variants:
+                key_variants.append(lower_key)
+            for key_variant in key_variants:
+                value = _normalize_secret_like_value(block.get(key_variant, ""))
+                if value:
+                    return value
     return ""
 
 
@@ -6735,7 +6774,7 @@ def initialize_api_settings(force: bool = False) -> None:
     daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
     # Secure source priority: secrets/env > DB
-    global_claude_key = _read_first_secret_or_env(
+    claude_key_secret = _read_first_secret_or_env(
         [
             "CLAUDE_API_KEY",
             "GLOBAL_CLAUDE_API_KEY",
@@ -6746,9 +6785,21 @@ def initialize_api_settings(force: bool = False) -> None:
             "ANTHROPIC_KEY",
             "ANTHROPIC_TOKEN",
         ]
-    ) or global_claude_key
-    global_alpha_key = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or global_alpha_key
-    global_finnhub_key = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or global_finnhub_key
+    ) or _read_secret_block_value(
+        ["claude", "CLAUDE", "anthropic", "ANTHROPIC", "api", "API"],
+        ["api_key", "key", "token", "claude_api_key", "anthropic_api_key"],
+    )
+    alpha_key_secret = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or _read_secret_block_value(
+        ["alpha_vantage", "ALPHA_VANTAGE", "alpha", "ALPHA", "api", "API"],
+        ["api_key", "key", "token", "alpha_vantage_api_key"],
+    )
+    finnhub_key_secret = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or _read_secret_block_value(
+        ["finnhub", "FINNHUB", "api", "API"],
+        ["api_key", "key", "token", "finnhub_api_key"],
+    )
+    global_claude_key = claude_key_secret or global_claude_key
+    global_alpha_key = alpha_key_secret or global_alpha_key
+    global_finnhub_key = finnhub_key_secret or global_finnhub_key
     gh_secret = _load_github_settings_from_secrets()
     github_token = (gh_secret.get("token") or "").strip() or github_token
     github_repo = _normalize_github_repo_value((gh_secret.get("repo") or "").strip()) or github_repo
@@ -6792,8 +6843,15 @@ def initialize_api_settings(force: bool = False) -> None:
         "daily_auto_snapshot_last_attempt_date": daily_auto_last_attempt_date,
         "daily_auto_snapshot_last_summary": daily_auto_last_summary,
     }
+    secrets_priority_keys = set()
+    if claude_key_secret:
+        secrets_priority_keys.add("global_claude_api_key")
+    if alpha_key_secret:
+        secrets_priority_keys.add("global_alpha_vantage_api_key")
+    if finnhub_key_secret:
+        secrets_priority_keys.add("global_finnhub_api_key")
     for k, v in global_map.items():
-        if force or k not in st.session_state:
+        if force or k not in st.session_state or k in secrets_priority_keys:
             st.session_state[k] = v
 
     # GitHub 관련은 Secrets를 항상 우선 반영한다(기존 세션 값이 있어도 덮어씀).
@@ -11281,6 +11339,10 @@ def render_api_settings_tab() -> None:
     st.session_state["global_openai_model"] = DEFAULT_OPENAI_MODEL
     st.caption("기본 AI 제공자: Claude (고정)")
     st.text_input("Claude API Key", key="global_claude_api_key", type="password", placeholder="sk-ant-...")
+    if str(st.session_state.get("global_claude_api_key", "") or "").strip():
+        st.caption("Claude API Key 감지됨 (현재 세션/Secrets/환경변수)")
+    else:
+        st.caption("Claude API Key 미감지: Secrets/환경변수의 `CLAUDE_API_KEY` 또는 `ANTHROPIC_API_KEY`를 확인하세요.")
     st.text_input(
         "Alpha Vantage API Key (선택)",
         key="global_alpha_vantage_api_key",
