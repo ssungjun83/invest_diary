@@ -6199,18 +6199,9 @@ def delete_company_compare_set(set_name: str) -> None:
 
 def get_ai_settings_from_session(prefix: str) -> tuple[str, str, str]:
     _ = prefix
-    provider = normalize_ai_provider(st.session_state.get("global_ai_provider", "claude"))
-    openai_key = (st.session_state.get("global_openai_api_key", "") or "").strip()
-    claude_key = (st.session_state.get("global_claude_api_key", "") or "").strip()
-    openai_model = (st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
-    claude_model = (st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
-
-    if provider == "claude":
-        api_key = claude_key
-        model = claude_model
-    else:
-        api_key = openai_key
-        model = openai_model
+    provider = "claude"
+    api_key = (st.session_state.get("global_claude_api_key", "") or "").strip()
+    model = (st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
     return provider, api_key, model
 
 
@@ -6715,12 +6706,13 @@ def save_app_settings_partial(settings: dict[str, str]) -> None:
 def initialize_api_settings(force: bool = False) -> None:
     settings = load_app_settings()
     store_sensitive = _to_bool_flag(settings.get("store_sensitive_keys", "false"))
-    global_provider = normalize_ai_provider(settings.get("ai_provider", "claude"))
-    global_openai_key = settings.get("openai_api_key", "") if store_sensitive else ""
+    # API 제공자는 Claude 고정으로 운영한다.
+    global_provider = "claude"
+    global_openai_key = ""
     global_claude_key = settings.get("claude_api_key", "") if store_sensitive else ""
     global_alpha_key = settings.get("alpha_vantage_api_key", "") if store_sensitive else ""
     global_finnhub_key = settings.get("finnhub_api_key", "") if store_sensitive else ""
-    global_openai_model = settings.get("openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL
+    global_openai_model = DEFAULT_OPENAI_MODEL
     global_claude_model = settings.get("claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL
     github_sync_enabled_raw = str(settings.get("github_sync_enabled", "false") or "false").strip()
     github_sync_enabled = _to_bool_flag(github_sync_enabled_raw)
@@ -6743,8 +6735,18 @@ def initialize_api_settings(force: bool = False) -> None:
     daily_auto_last_summary = str(settings.get("daily_auto_snapshot_last_summary", "") or "").strip()
 
     # Secure source priority: secrets/env > DB
-    global_openai_key = _read_first_secret_or_env(["OPENAI_API_KEY", "GLOBAL_OPENAI_API_KEY"]) or global_openai_key
-    global_claude_key = _read_first_secret_or_env(["CLAUDE_API_KEY", "GLOBAL_CLAUDE_API_KEY"]) or global_claude_key
+    global_claude_key = _read_first_secret_or_env(
+        [
+            "CLAUDE_API_KEY",
+            "GLOBAL_CLAUDE_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GLOBAL_ANTHROPIC_API_KEY",
+            "CLAUDE_KEY",
+            "CLAUDE_TOKEN",
+            "ANTHROPIC_KEY",
+            "ANTHROPIC_TOKEN",
+        ]
+    ) or global_claude_key
     global_alpha_key = _read_first_secret_or_env(["ALPHA_VANTAGE_API_KEY", "GLOBAL_ALPHA_VANTAGE_API_KEY"]) or global_alpha_key
     global_finnhub_key = _read_first_secret_or_env(["FINNHUB_API_KEY", "GLOBAL_FINNHUB_API_KEY"]) or global_finnhub_key
     gh_secret = _load_github_settings_from_secrets()
@@ -9740,40 +9742,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                 ai_err = "AI API 키가 없어 템플릿 기반으로 분석을 생성합니다."
 
             if ai_err and (analysis_ai_api_key or "").strip():
-                fallback_provider = "openai" if normalize_ai_provider(analysis_ai_provider) == "claude" else "claude"
-                fallback_key = (
-                    st.session_state.get("global_openai_api_key", "")
-                    if fallback_provider == "openai"
-                    else st.session_state.get("global_claude_api_key", "")
-                )
-                fallback_model = (
-                    st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL)
-                    if fallback_provider == "openai"
-                    else st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL)
-                )
-                fallback_key = (fallback_key or "").strip()
-                fallback_model = (fallback_model or "").strip()
-                if fallback_key:
-                    st.warning(
-                        f"{ai_provider_label(analysis_ai_provider)} 호출 실패로 "
-                        f"{ai_provider_label(fallback_provider)} 모델로 1회 재시도합니다."
-                    )
-                    fallback_analysis, fallback_err = generate_company_analysis_with_ai(
-                        company_name=company_name,
-                        ticker=ticker,
-                        financial_summary=financial_summary,
-                        api_key=fallback_key,
-                        model=fallback_model,
-                        provider=fallback_provider,
-                    )
-                    if not fallback_err and fallback_analysis:
-                        analysis = fallback_analysis
-                        ai_err = ""
-                        used_ai_provider = fallback_provider
-                        used_ai_model = fallback_model
-                        st.caption(f"AI 생성 소스: {ai_provider_label(used_ai_provider)}")
-                    else:
-                        ai_err = f"{ai_err} | 대체 호출 실패: {fallback_err}"
+                st.warning("Claude 호출 실패로 템플릿 기반 분석으로 전환합니다.")
 
             if ai_err:
                 st.warning(ai_err)
@@ -11294,7 +11263,7 @@ def render_api_settings_tab() -> None:
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">API 설정</div>', unsafe_allow_html=True)
     st.caption(
-        "OpenAI/Claude API 키와 기본 모델을 저장하면 기업정보/기업분석/기업 점수 탭에서 공통으로 사용합니다. "
+        "Claude API 키와 기본 모델을 저장하면 기업정보/기업분석/기업 점수 탭에서 공통으로 사용합니다. "
         "추가로 Alpha Vantage/Finnhub 키를 넣으면 야후 외 경로로 기업 데이터를 보조 수집합니다. "
         "GitHub 동기화를 켜면 엑셀을 원격 저장소에서 자동 불러오고 저장 시 자동 커밋합니다."
     )
@@ -11302,20 +11271,15 @@ def render_api_settings_tab() -> None:
     if "api_settings_saved_notice" in st.session_state:
         st.success(st.session_state.pop("api_settings_saved_notice"))
 
-    if "global_openai_model_options" not in st.session_state:
-        st.session_state["global_openai_model_options"] = []
     if "global_claude_model_options" not in st.session_state:
         st.session_state["global_claude_model_options"] = []
     if "store_sensitive_keys" not in st.session_state:
         st.session_state["store_sensitive_keys"] = False
 
-    st.selectbox(
-        "기본 AI 제공자",
-        options=["openai", "claude"],
-        format_func=lambda x: ai_provider_label(x),
-        key="global_ai_provider",
-    )
-    st.text_input("OpenAI API Key", key="global_openai_api_key", type="password", placeholder="sk-...")
+    st.session_state["global_ai_provider"] = "claude"
+    st.session_state["global_openai_api_key"] = ""
+    st.session_state["global_openai_model"] = DEFAULT_OPENAI_MODEL
+    st.caption("기본 AI 제공자: Claude (고정)")
     st.text_input("Claude API Key", key="global_claude_api_key", type="password", placeholder="sk-ant-...")
     st.text_input(
         "Alpha Vantage API Key (선택)",
@@ -11337,26 +11301,9 @@ def render_api_settings_tab() -> None:
     if not bool(st.session_state.get("store_sensitive_keys", False)):
         st.caption("권장 모드: API 키/GitHub Token은 DB에 저장하지 않고 현재 세션 + Secrets/환경변수만 사용")
 
-    fetch_col1, fetch_col2, fetch_col3 = st.columns([1, 1, 1.2])
-    with fetch_col1:
-        fetch_openai_btn = st.button("OpenAI 모델 조회", key="api_fetch_openai_models_btn")
-    with fetch_col2:
-        fetch_claude_btn = st.button("Claude 모델 조회", key="api_fetch_claude_models_btn")
-    with fetch_col3:
-        fetch_all_btn = st.button("모델 전체 조회", key="api_fetch_all_models_btn")
+    fetch_claude_btn = st.button("Claude 모델 조회", key="api_fetch_claude_models_btn")
 
-    if fetch_openai_btn or fetch_all_btn:
-        models, err = fetch_openai_available_models(st.session_state.get("global_openai_api_key", ""))
-        if err:
-            st.warning(err)
-        else:
-            st.session_state["global_openai_model_options"] = models
-            current = str(st.session_state.get("global_openai_model", "") or "").strip()
-            if not current or current not in models:
-                st.session_state["global_openai_model"] = models[0]
-            st.success(f"OpenAI 사용 가능 모델 {len(models):,.0f}개를 불러왔습니다.")
-
-    if fetch_claude_btn or fetch_all_btn:
+    if fetch_claude_btn:
         models, err = fetch_claude_available_models(st.session_state.get("global_claude_api_key", ""))
         if err:
             st.warning(err)
@@ -11366,15 +11313,6 @@ def render_api_settings_tab() -> None:
             if not current or current not in models:
                 st.session_state["global_claude_model"] = models[0]
             st.success(f"Claude 사용 가능 모델 {len(models):,.0f}개를 불러왔습니다.")
-
-    openai_options = list(st.session_state.get("global_openai_model_options", []))
-    current_openai = str(st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
-    if current_openai and current_openai not in openai_options:
-        openai_options = [current_openai] + openai_options
-    if openai_options:
-        st.selectbox("OpenAI 모델", options=openai_options, key="global_openai_model")
-    else:
-        st.text_input("OpenAI 모델", key="global_openai_model")
 
     claude_options = list(st.session_state.get("global_claude_model_options", []))
     current_claude = str(st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
@@ -11505,12 +11443,12 @@ def render_api_settings_tab() -> None:
         save_app_settings(
             {
                 "store_sensitive_keys": "true" if persist_sensitive else "false",
-                "ai_provider": normalize_ai_provider(st.session_state.get("global_ai_provider", "claude")),
-                "openai_api_key": st.session_state.get("global_openai_api_key", "") if persist_sensitive else "",
+                "ai_provider": "claude",
+                "openai_api_key": "",
                 "claude_api_key": st.session_state.get("global_claude_api_key", "") if persist_sensitive else "",
                 "alpha_vantage_api_key": st.session_state.get("global_alpha_vantage_api_key", "") if persist_sensitive else "",
                 "finnhub_api_key": st.session_state.get("global_finnhub_api_key", "") if persist_sensitive else "",
-                "openai_model": st.session_state.get("global_openai_model", DEFAULT_OPENAI_MODEL),
+                "openai_model": DEFAULT_OPENAI_MODEL,
                 "claude_model": st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL),
                 "github_sync_enabled": "true" if bool(st.session_state.get("github_sync_enabled", False)) else "false",
                 "github_sync_on_change": "true" if bool(st.session_state.get("github_sync_on_change", True)) else "false",
