@@ -238,6 +238,8 @@ DEFAULT_TICKER_HINTS = {
     "피바디에너지": "BTU",
     "발레로 에너지": "VLO",
     "발레로에너지": "VLO",
+    "하프니아": "HAFN",
+    "하프니아 리미티드": "HAFN",
     "터치 브로스": "BROS",
     "터치브로스": "BROS",
     "AGNC 인베스트먼트": "AGNC",
@@ -7325,12 +7327,16 @@ def upsert_company_list_entry(
         existing_sector = (row[1] or "").strip() if row and len(row) > 1 and row[1] else ""
         existing_price = _safe_to_float(row[2]) if row and len(row) > 2 else None
         existing_price_source = (row[3] or "").strip() if row and len(row) > 3 and row[3] else ""
-        existing_source = (row[4] or "").strip().lower() if row and len(row) > 4 and row[4] else ""
+        existing_source_raw = (row[4] or "").strip() if row and len(row) > 4 and row[4] else ""
+        existing_source = existing_source_raw.lower()
         builtin_hint = get_builtin_ticker_hint(name)
+        next_source = source_text if source_text is not None else (existing_source_raw or None)
         # 수동으로 저장된 티커(manual*)는 자동 경로가 덮어쓰지 못하게 고정한다.
         manual_ticker_locked = bool(existing_ticker) and existing_source.startswith("manual")
         if manual_ticker_locked and not is_manual_source:
             tkr = existing_ticker
+            # 자동 경로가 들어와도 수동 원본 출처를 유지해 잠금이 해제되지 않게 한다.
+            next_source = existing_source_raw or next_source
         elif builtin_hint and not (is_manual_source and tkr):
             # 자동/일괄 경로에서는 내장 티커 힌트를 우선 적용해 오탐 저장을 방지한다.
             # 단, 수동 저장(manual*)에서 직접 입력한 티커는 항상 사용자 값을 우선한다.
@@ -7377,7 +7383,7 @@ def upsert_company_list_entry(
                 float(next_price) if next_price is not None else None,
                 next_price_source or None,
                 now_str if next_price is not None else None,
-                source_text if source_text is not None else None,
+                next_source if next_source is not None else None,
                 now_str,
                 now_str,
             ),
