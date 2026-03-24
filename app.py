@@ -10480,7 +10480,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     if cash_usd_key not in st.session_state:
         st.session_state[cash_usd_key] = float(saved_cash_usd)
 
-    cash_col1, cash_col2, cash_col3 = st.columns([1, 1, 1.1])
+    cash_col1, cash_col2, cash_col3, cash_col4 = st.columns([1, 1, 1.05, 1.2])
     with cash_col1:
         input_cash_krw = st.number_input(
             "원화 예수금 (KRW)",
@@ -10523,6 +10523,16 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
                     f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) "
                     f"/ 보유종목 스냅샷이 없어 GitHub 동기화는 보류됩니다."
                 )
+            st.rerun()
+    with cash_col4:
+        if st.button("저장 예수금 불러오기", key=f"reload_cash_from_db_btn_{cash_key_suffix}"):
+            latest_cash_krw, latest_cash_usd = load_snapshot_cash_exact(selected_date)
+            st.session_state[cash_krw_key] = float(latest_cash_krw)
+            st.session_state[cash_usd_key] = float(latest_cash_usd)
+            st.success(
+                f"{selected_date} 저장 예수금 반영 완료 "
+                f"(원화 {latest_cash_krw:,.0f}원 / 달러 {format_usd(latest_cash_usd)})"
+            )
             st.rerun()
 
     if "portfolio_editor_nonce" not in st.session_state:
@@ -15386,6 +15396,10 @@ def main() -> None:
                 load_snapshot_exact(selected_date), usd_krw_rate, force_usd_rate=True
             )
             st.session_state["editing_df_date"] = selected_date_key
+            cash_key_suffix = selected_date.isoformat().replace("-", "")
+            cash_krw, cash_usd = load_snapshot_cash_exact(selected_date)
+            st.session_state[f"input_cash_krw_{cash_key_suffix}"] = float(cash_krw)
+            st.session_state[f"input_cash_usd_{cash_key_suffix}"] = float(cash_usd)
             st.success(f"{selected_date} 데이터 불러오기 완료")
 
         if st.button("선택 날짜 신규 입력 시작(초기화)", key="sidebar_start_fresh_date_btn"):
@@ -15428,6 +15442,10 @@ def main() -> None:
             load_snapshot_exact(selected_date), usd_krw_rate, force_usd_rate=True
         )
         st.session_state["editing_df_date"] = selected_date_key
+        cash_key_suffix = selected_date.isoformat().replace("-", "")
+        cash_krw, cash_usd = load_snapshot_cash_exact(selected_date)
+        st.session_state[f"input_cash_krw_{cash_key_suffix}"] = float(cash_krw)
+        st.session_state[f"input_cash_usd_{cash_key_suffix}"] = float(cash_usd)
     else:
         st.session_state["editing_df"] = ensure_portfolio_columns(
             st.session_state["editing_df"], usd_krw_rate, force_usd_rate=True
