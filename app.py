@@ -268,6 +268,22 @@ def normalize_ticker_text(value: str) -> str:
     return text
 
 
+def normalize_stock_name_text(value: str) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    # UI에서 동일하게 보여도 서로 다른 문자로 저장될 수 있는 공백/제로폭 문자들을 정규화한다.
+    text = (
+        text.replace("\u00a0", " ")
+        .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+        .replace("\ufeff", "")
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def clean_valid_ticker(value: str) -> str:
     ticker = normalize_ticker_text(value)
     if not ticker:
@@ -1325,29 +1341,26 @@ def save_snapshot(
     conn = get_conn()
     try:
         conn.execute("DELETE FROM snapshots WHERE snapshot_date = ?", (date_str,))
-        records = [
-            (
-                date_str,
-                str(row[COL_NAME]),
-                float(row[COL_QTY]),
-                float(row[COL_VALUE]),
-                float(row[COL_PNL]),
-                float(row[COL_RETURN]),
+        records = []
+        for _, row in df.iterrows():
+            stock_name = normalize_stock_name_text(row.get(COL_NAME, ""))
+            if not stock_name:
+                continue
+            currency = "USD" if str(row.get(COL_CURRENCY, "KRW")).upper() == "USD" else "KRW"
+            fx_rate = float(usd_krw_rate) if currency == "USD" else 1.0
+            records.append(
                 (
-                    "USD"
-                    if str(row.get(COL_CURRENCY, "KRW")).upper() == "USD"
-                    else "KRW"
-                ),
-                (
-                    float(usd_krw_rate)
-                    if str(row.get(COL_CURRENCY, "KRW")).upper() == "USD"
-                    else 1.0
-                ),
-                now_str,
+                    date_str,
+                    stock_name,
+                    float(row[COL_QTY]),
+                    float(row[COL_VALUE]),
+                    float(row[COL_PNL]),
+                    float(row[COL_RETURN]),
+                    currency,
+                    fx_rate,
+                    now_str,
+                )
             )
-            for _, row in df.iterrows()
-            if str(row[COL_NAME]).strip()
-        ]
         conn.executemany(
             """
             INSERT INTO snapshots (
@@ -7436,6 +7449,24 @@ def _archive_company_list_state(
     )
 
 
+def _resolve_company_list_stored_name(conn: sqlite3.Connection, normalized_name: str) -> str:
+    name = normalize_stock_name_text(normalized_name)
+    if not name:
+        return ""
+    exact = conn.execute(
+        "SELECT stock_name FROM company_list WHERE stock_name = ? LIMIT 1",
+        (name,),
+    ).fetchone()
+    if exact and exact[0]:
+        return str(exact[0])
+    rows = conn.execute("SELECT stock_name FROM company_list").fetchall()
+    for row in rows:
+        raw = str((row[0] if row else "") or "")
+        if normalize_stock_name_text(raw) == name:
+            return raw
+    return name
+
+
 def load_company_list() -> pd.DataFrame:
     conn = get_conn()
     try:
@@ -7453,14 +7484,15 @@ def load_company_list() -> pd.DataFrame:
 
 
 def get_company_list_ticker(stock_name: str) -> str:
-    name = (stock_name or "").strip()
+    name = normalize_stock_name_text(stock_name)
     if not name:
         return ""
     conn = get_conn()
     try:
+        lookup_name = _resolve_company_list_stored_name(conn, name)
         row = conn.execute(
             "SELECT ticker FROM company_list WHERE stock_name = ?",
-            (name,),
+            (lookup_name,),
         ).fetchone()
     finally:
         conn.close()
@@ -7472,14 +7504,15 @@ def get_company_list_ticker(stock_name: str) -> str:
 
 
 def get_company_list_sector(stock_name: str) -> str:
-    name = (stock_name or "").strip()
+    name = normalize_stock_name_text(stock_name)
     if not name:
         return ""
     conn = get_conn()
     try:
+        lookup_name = _resolve_company_list_stored_name(conn, name)
         row = conn.execute(
             "SELECT sector FROM company_list WHERE stock_name = ?",
-            (name,),
+            (lookup_name,),
         ).fetchone()
     finally:
         conn.close()
@@ -7604,7 +7637,7 @@ def upsert_company_list_entry(
     price_krw: float | None = None,
     price_source: str | None = None,
 ) -> None:
-    name = (stock_name or "").strip()
+    name = normalize_stock_name_text(stock_name)
     if not name:
         return
 
@@ -7621,9 +7654,10 @@ def upsert_company_list_entry(
 
     conn = get_conn()
     try:
+        lookup_name = _resolve_company_list_stored_name(conn, name)
         row = conn.execute(
             "SELECT ticker, sector, price_krw, price_source, source FROM company_list WHERE stock_name = ?",
-            (name,),
+            (lookup_name,),
         ).fetchone()
         if not row:
             archived = conn.execute(
@@ -7703,6 +7737,8 @@ def upsert_company_list_entry(
                 now_str,
             ),
         )
+        if lookup_name and lookup_name != name:
+            conn.execute("DELETE FROM company_list WHERE stock_name = ?", (lookup_name,))
         _archive_company_list_state(
             conn,
             stock_name=name,
@@ -7720,14 +7756,15 @@ def upsert_company_list_entry(
 
 
 def delete_company_list_entry(stock_name: str) -> None:
-    name = (stock_name or "").strip()
+    name = normalize_stock_name_text(stock_name)
     if not name:
         return
     conn = get_conn()
     try:
+        lookup_name = _resolve_company_list_stored_name(conn, name)
         row = conn.execute(
             "SELECT stock_name, ticker, sector, price_krw, price_source, price_updated_at, source FROM company_list WHERE stock_name = ?",
-            (name,),
+            (lookup_name,),
         ).fetchone()
         if row:
             _archive_company_list_state(
@@ -7741,22 +7778,23 @@ def delete_company_list_entry(stock_name: str) -> None:
                 source=str(row[6] or ""),
                 action="delete",
             )
-        conn.execute("DELETE FROM company_list WHERE stock_name = ?", (name,))
+        conn.execute("DELETE FROM company_list WHERE stock_name = ?", (lookup_name,))
         conn.commit()
     finally:
         conn.close()
 
 
 def clear_company_list_ticker(stock_name: str, source: str = "manual_edit_clear") -> bool:
-    name = (stock_name or "").strip()
+    name = normalize_stock_name_text(stock_name)
     if not name:
         return False
     now_str = datetime.now().isoformat(timespec="seconds")
     conn = get_conn()
     try:
+        lookup_name = _resolve_company_list_stored_name(conn, name)
         row = conn.execute(
             "SELECT stock_name, ticker, sector, price_krw, price_source, price_updated_at, source FROM company_list WHERE stock_name = ?",
-            (name,),
+            (lookup_name,),
         ).fetchone()
         if not row:
             return False
@@ -7782,7 +7820,7 @@ def clear_company_list_ticker(stock_name: str, source: str = "manual_edit_clear"
                 updated_at = ?
             WHERE stock_name = ?
             """,
-            ((source or "manual_edit_clear").strip(), now_str, name),
+            ((source or "manual_edit_clear").strip(), now_str, lookup_name),
         )
         conn.commit()
         return True
@@ -9315,7 +9353,7 @@ def ensure_numeric(df: pd.DataFrame, usd_krw_rate: float) -> pd.DataFrame:
     for col in [COL_QTY, COL_FX_RATE, COL_VALUE, COL_PNL, COL_RETURN]:
         cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
     cleaned = ensure_portfolio_columns(cleaned, usd_krw_rate, force_usd_rate=True)
-    cleaned[COL_NAME] = cleaned[COL_NAME].astype(str).str.strip()
+    cleaned[COL_NAME] = cleaned[COL_NAME].astype(str).apply(normalize_stock_name_text)
     cleaned = cleaned.dropna(subset=[COL_NAME, COL_QTY, COL_VALUE, COL_PNL, COL_RETURN, COL_CURRENCY, COL_FX_RATE])
     cleaned = cleaned[cleaned[COL_NAME] != ""]
     cleaned = cleaned[COLUMNS]
@@ -9323,11 +9361,25 @@ def ensure_numeric(df: pd.DataFrame, usd_krw_rate: float) -> pd.DataFrame:
 
 
 def get_holding_stock_names(current_df: pd.DataFrame) -> list[str]:
-    names = set(current_df[COL_NAME].dropna().astype(str).tolist()) if not current_df.empty else set()
+    names = (
+        {
+            normalize_stock_name_text(v)
+            for v in current_df[COL_NAME].dropna().astype(str).tolist()
+            if normalize_stock_name_text(v)
+        }
+        if not current_df.empty
+        else set()
+    )
     conn = get_conn()
     try:
         rows = conn.execute("SELECT DISTINCT stock_name FROM snapshots ORDER BY stock_name").fetchall()
-        names.update([row[0] for row in rows if row and row[0]])
+        names.update(
+            [
+                normalize_stock_name_text(row[0])
+                for row in rows
+                if row and normalize_stock_name_text(row[0])
+            ]
+        )
     finally:
         conn.close()
     return sorted(names)
@@ -9341,7 +9393,13 @@ def get_all_stock_names(current_df: pd.DataFrame) -> list[str]:
             rows = conn.execute(
                 f"SELECT DISTINCT stock_name FROM {table_name} WHERE stock_name IS NOT NULL AND stock_name != ''"
             ).fetchall()
-            names.update([row[0] for row in rows if row and row[0]])
+            names.update(
+                [
+                    normalize_stock_name_text(row[0])
+                    for row in rows
+                    if row and normalize_stock_name_text(row[0])
+                ]
+            )
     finally:
         conn.close()
     return sorted(names)
@@ -9386,13 +9444,13 @@ def build_market_preference_map(current_df: pd.DataFrame) -> dict[str, str]:
     company_list_df = load_company_list()
     if not company_list_df.empty:
         for _, row in company_list_df.iterrows():
-            nm = str(row.get("stock_name") or "").strip()
+            nm = normalize_stock_name_text(row.get("stock_name"))
             if not nm:
                 continue
             list_ticker_map[nm] = clean_valid_ticker(str(row.get("ticker") or ""))
 
     for _, row in current_df.iterrows():
-        name = str(row.get(COL_NAME) or "").strip()
+        name = normalize_stock_name_text(row.get(COL_NAME))
         if not name:
             continue
         ticker = clean_valid_ticker(str(row.get("ticker") or "")) or list_ticker_map.get(name, "")
@@ -10471,10 +10529,19 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     st.caption(f"{selected_date} 기준 USD/KRW {usd_krw_rate:,.0f} 자동 적용")
     saved_cash_krw, saved_cash_usd = load_snapshot_cash_exact(selected_date)
     st.caption(f"현재 저장 예수금: 원화 {saved_cash_krw:,.0f}원 / 달러 {format_usd(saved_cash_usd)}")
+    if "portfolio_cash_reload_notice" in st.session_state:
+        st.success(st.session_state.pop("portfolio_cash_reload_notice"))
 
     cash_key_suffix = selected_date.isoformat().replace("-", "")
     cash_krw_key = f"input_cash_krw_{cash_key_suffix}"
     cash_usd_key = f"input_cash_usd_{cash_key_suffix}"
+    cash_reload_request_key = f"reload_cash_request_{cash_key_suffix}"
+
+    pending_reload = st.session_state.pop(cash_reload_request_key, None)
+    if isinstance(pending_reload, (list, tuple)) and len(pending_reload) >= 2:
+        st.session_state[cash_krw_key] = float(pending_reload[0] or 0.0)
+        st.session_state[cash_usd_key] = float(pending_reload[1] or 0.0)
+
     if cash_krw_key not in st.session_state:
         st.session_state[cash_krw_key] = float(saved_cash_krw)
     if cash_usd_key not in st.session_state:
@@ -10527,9 +10594,8 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     with cash_col4:
         if st.button("저장 예수금 불러오기", key=f"reload_cash_from_db_btn_{cash_key_suffix}"):
             latest_cash_krw, latest_cash_usd = load_snapshot_cash_exact(selected_date)
-            st.session_state[cash_krw_key] = float(latest_cash_krw)
-            st.session_state[cash_usd_key] = float(latest_cash_usd)
-            st.success(
+            st.session_state[cash_reload_request_key] = (float(latest_cash_krw), float(latest_cash_usd))
+            st.session_state["portfolio_cash_reload_notice"] = (
                 f"{selected_date} 저장 예수금 반영 완료 "
                 f"(원화 {latest_cash_krw:,.0f}원 / 달러 {format_usd(latest_cash_usd)})"
             )
@@ -10962,16 +11028,40 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             st.session_state["portfolio_delete_warning"] = "삭제할 종목을 먼저 선택해 주세요."
             st.rerun()
 
-        remained_df = final_df[~final_df[COL_NAME].astype(str).str.strip().isin(targets)].copy()
+        name_series = final_df[COL_NAME].astype(str).str.strip()
+        removed_names = sorted({nm for nm in name_series[name_series.isin(targets)].tolist() if nm})
+        remained_df = final_df[~name_series.isin(targets)].copy()
         removed_count = int(len(final_df) - len(remained_df))
+        kept_watch_count = 0
+        if removed_count > 0 and removed_names:
+            try:
+                existing_watch_df = load_company_list()
+                existing_watch_names = (
+                    {
+                        str(nm).strip()
+                        for nm in existing_watch_df.get("stock_name", pd.Series(dtype="object")).tolist()
+                        if str(nm).strip()
+                    }
+                    if isinstance(existing_watch_df, pd.DataFrame)
+                    else set()
+                )
+            except Exception:
+                existing_watch_names = set()
+            for stock_name in removed_names:
+                if stock_name in existing_watch_names:
+                    continue
+                upsert_company_list_entry(stock_name, source="holding_delete_keep_watch")
+                existing_watch_names.add(stock_name)
+                kept_watch_count += 1
         remained_df = ensure_portfolio_columns(remained_df, usd_krw_rate, force_usd_rate=True)
         st.session_state["editing_df"] = remained_df
         st.session_state["portfolio_editor_nonce"] = int(st.session_state.get("portfolio_editor_nonce", 0)) + 1
         st.session_state["portfolio_delete_nonce"] = int(st.session_state.get("portfolio_delete_nonce", 0)) + 1
         if removed_count > 0:
-            st.session_state["portfolio_delete_notice"] = (
-                f"선택 종목 삭제 완료: {removed_count}건"
-            )
+            msg = f"선택 종목 삭제 완료: {removed_count}건"
+            if kept_watch_count > 0:
+                msg += f" / 관심종목 유지 {kept_watch_count}건"
+            st.session_state["portfolio_delete_notice"] = msg
         else:
             st.session_state["portfolio_delete_warning"] = "삭제할 대상이 없어 변경된 항목이 없습니다."
         st.rerun()
@@ -11070,13 +11160,33 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     company_list_df = load_company_list()
     stock_names = get_holding_stock_names(current_df)
     market_pref_map = build_market_preference_map(current_df)
-    analyzed_names = analysis_all["stock_name"].dropna().astype(str).unique().tolist() if not analysis_all.empty else []
+    analyzed_names = (
+        [
+            normalize_stock_name_text(v)
+            for v in analysis_all["stock_name"].dropna().astype(str).unique().tolist()
+            if normalize_stock_name_text(v)
+        ]
+        if not analysis_all.empty
+        else []
+    )
     profiled_names = (
-        company_profile_df["stock_name"].dropna().astype(str).unique().tolist()
+        [
+            normalize_stock_name_text(v)
+            for v in company_profile_df["stock_name"].dropna().astype(str).unique().tolist()
+            if normalize_stock_name_text(v)
+        ]
         if not company_profile_df.empty
         else []
     )
-    listed_names = company_list_df["stock_name"].dropna().astype(str).unique().tolist() if not company_list_df.empty else []
+    listed_names = (
+        [
+            normalize_stock_name_text(v)
+            for v in company_list_df["stock_name"].dropna().astype(str).unique().tolist()
+            if normalize_stock_name_text(v)
+        ]
+        if not company_list_df.empty
+        else []
+    )
     options = sorted(set(stock_names + analyzed_names + listed_names + profiled_names))
 
     if "analysis_date" not in st.session_state:
@@ -11260,6 +11370,11 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         st.session_state["analysis_selected_overview_ticker_input"] = ""
     if "analysis_selected_overview_sector_input" not in st.session_state:
         st.session_state["analysis_selected_overview_sector_input"] = ""
+    pending_selected_overview_fields = st.session_state.pop("analysis_selected_overview_fields_pending", None)
+    if isinstance(pending_selected_overview_fields, dict):
+        for key in ["analysis_selected_overview_ticker_input", "analysis_selected_overview_sector_input"]:
+            if key in pending_selected_overview_fields:
+                st.session_state[key] = str(pending_selected_overview_fields.get(key) or "")
 
     add_col1, add_col2, add_col3, add_col4, add_col5 = st.columns([1.3, 1.0, 1.0, 0.9, 0.7])
     with add_col1:
@@ -11456,8 +11571,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     if "analysis_watch_image_notice" in st.session_state:
         st.success(st.session_state.pop("analysis_watch_image_notice"))
 
-    holding_set = set(stock_names)
-    listed_set = set(listed_names)
+    holding_set = {normalize_stock_name_text(v) for v in stock_names if normalize_stock_name_text(v)}
+    listed_set = {normalize_stock_name_text(v) for v in listed_names if normalize_stock_name_text(v)}
     ticker_map = {}
     sector_map = {}
     price_map = {}
@@ -11465,7 +11580,7 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     registered_at_map = {}
     if not company_list_df.empty:
         for _, row in company_list_df.iterrows():
-            nm = str(row.get("stock_name") or "").strip()
+            nm = normalize_stock_name_text(row.get("stock_name"))
             if not nm:
                 continue
             ticker_map[nm] = clean_valid_ticker(str(row.get("ticker") or ""))
@@ -11676,11 +11791,27 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
     if refresh_price_btn:
         ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+        price_target_source = "현재 입력 보유종목"
         holding_names = (
             current_df[COL_NAME].dropna().astype(str).str.strip().replace({"": pd.NA}).dropna().drop_duplicates().tolist()
             if isinstance(current_df, pd.DataFrame) and not current_df.empty and COL_NAME in current_df.columns
             else []
         )
+        if not holding_names:
+            latest_date_text, latest_df = load_latest_snapshot()
+            if latest_df is not None and not latest_df.empty and COL_NAME in latest_df.columns:
+                holding_names = (
+                    latest_df[COL_NAME]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .replace({"": pd.NA})
+                    .dropna()
+                    .drop_duplicates()
+                    .tolist()
+                )
+                if holding_names:
+                    price_target_source = f"최신 스냅샷({latest_date_text}) 보유종목"
         targets = []
         if holding_names:
             holding_name_set = set(holding_names)
@@ -11717,9 +11848,39 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
                     price_krw, price_src = fetch_current_price_krw_from_ticker(ticker, date.today())
                     if price_krw is None or float(price_krw) <= 0:
-                        fail_reason = (price_src or "주가 조회 실패").strip()
-                        failed_details.append(f"{company_name}({fail_reason})")
-                        continue
+                        original_ticker = ticker
+                        retry_ticker, retry_src = resolve_ticker_auto_with_retry(
+                            company_name,
+                            use_ai=bool(ai_api_key),
+                            api_key=ai_api_key,
+                            model=ai_model,
+                            provider=ai_provider,
+                            market_preference=market_pref_map.get(company_name, ""),
+                        )
+                        retry_ticker = clean_valid_ticker(retry_ticker)
+                        if retry_ticker and retry_ticker != original_ticker:
+                            retry_price_krw, retry_price_src = fetch_current_price_krw_from_ticker(
+                                retry_ticker, date.today()
+                            )
+                            if retry_price_krw is not None and float(retry_price_krw) > 0:
+                                ticker = retry_ticker
+                                price_krw = float(retry_price_krw)
+                                price_src = (
+                                    f"{retry_price_src or '주가 조회'} / 재탐색티커:{retry_ticker}"
+                                )
+                            else:
+                                fail_reason = (retry_price_src or "주가 조회 실패").strip()
+                                failed_details.append(
+                                    f"{company_name}({original_ticker} 실패, 재탐색 {retry_ticker}도 실패: {fail_reason})"
+                                )
+                                continue
+                        else:
+                            fail_reason = (price_src or "주가 조회 실패").strip()
+                            retry_note = ""
+                            if retry_src and retry_src != price_src:
+                                retry_note = f" / 재탐색:{retry_src}"
+                            failed_details.append(f"{company_name}({ticker}: {fail_reason}{retry_note})")
+                            continue
 
                     upsert_company_list_entry(
                         company_name,
@@ -11770,9 +11931,13 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     auto_save_warn = f"주가 갱신 후 자동 저장 실패: {exc}"
 
             if updated_count > 0:
-                st.session_state["analysis_bulk_price_notice"] = f"현재 주가 업데이트 완료: {updated_count}개{auto_save_suffix}"
+                st.session_state["analysis_bulk_price_notice"] = (
+                    f"현재 주가 업데이트 완료: {updated_count}개 (기준: {price_target_source}){auto_save_suffix}"
+                )
             else:
-                st.session_state["analysis_bulk_price_notice"] = "현재 주가를 새로 업데이트하지 못했습니다."
+                st.session_state["analysis_bulk_price_notice"] = (
+                    f"현재 주가를 새로 업데이트하지 못했습니다. (기준: {price_target_source})"
+                )
             if auto_save_warn:
                 failed_details.append(auto_save_warn)
             if failed_details:
@@ -12020,7 +12185,12 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
     selected_company_for_edit = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_company"), "")
     if selected_company_for_edit:
         st.markdown("##### 선택 기업 티커/섹터 수정")
-        edit_col1, edit_col2, edit_col3, edit_col4, edit_col5 = st.columns([1.0, 1.0, 1.1, 0.75, 0.85])
+        if "analysis_selected_sector_lookup_notice" in st.session_state:
+            st.success(st.session_state.pop("analysis_selected_sector_lookup_notice"))
+        if "analysis_selected_sector_lookup_warning" in st.session_state:
+            st.warning(st.session_state.pop("analysis_selected_sector_lookup_warning"))
+
+        edit_col1, edit_col2, edit_col3, edit_col4, edit_col5, edit_col6 = st.columns([1.0, 1.0, 1.1, 0.85, 1.0, 0.85])
         with edit_col1:
             st.caption(f"선택 기업: **{selected_company_for_edit}**")
         with edit_col2:
@@ -12038,6 +12208,8 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
         with edit_col4:
             save_selected_meta_btn = st.button("선택값 저장", key="analysis_save_selected_meta_btn")
         with edit_col5:
+            lookup_selected_sector_ai_btn = st.button("산업섹터 AI 찾기", key="analysis_lookup_selected_sector_ai_btn")
+        with edit_col6:
             clear_selected_ticker_btn = st.button("티커 비우기", key="analysis_clear_selected_ticker_btn")
 
         if save_selected_meta_btn:
@@ -12065,6 +12237,61 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
                     + (f" (티커 {ticker_new})" if ticker_new else "")
                 )
                 st.rerun()
+
+        if lookup_selected_sector_ai_btn:
+            ticker_raw = _sanitize_widget_text(st.session_state.get("analysis_selected_overview_ticker_input"), "")
+            ticker_for_lookup = clean_valid_ticker(ticker_raw)
+            if ticker_raw and not ticker_for_lookup:
+                st.session_state["analysis_selected_sector_lookup_warning"] = (
+                    "티커 형식이 올바르지 않습니다. 예: NOV, AAPL, 005930.KS"
+                )
+                st.rerun()
+            if not ticker_for_lookup:
+                ticker_for_lookup = clean_valid_ticker(get_company_list_ticker(selected_company_for_edit))
+            if not ticker_for_lookup:
+                st.session_state["analysis_selected_sector_lookup_warning"] = (
+                    "산업섹터 AI 조회를 위해 티커를 먼저 입력하거나 저장해 주세요."
+                )
+                st.rerun()
+
+            ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
+            if not str(ai_api_key or "").strip():
+                st.session_state["analysis_selected_sector_lookup_warning"] = (
+                    "AI API Key가 없어 산업섹터 AI 조회를 실행할 수 없습니다."
+                )
+                st.rerun()
+
+            with st.spinner("선택 기업 산업섹터를 AI로 찾는 중입니다..."):
+                ai_sector, ai_src = infer_sector_with_ai(
+                    selected_company_for_edit,
+                    ticker=ticker_for_lookup,
+                    api_key=ai_api_key,
+                    model=ai_model,
+                    provider=ai_provider,
+                )
+            if not ai_sector:
+                st.session_state["analysis_selected_sector_lookup_warning"] = (
+                    ai_src or "산업섹터 AI 조회에 실패했습니다."
+                )
+                st.rerun()
+
+            upsert_company_list_entry(
+                selected_company_for_edit,
+                ticker=ticker_for_lookup,
+                sector=ai_sector,
+                source="manual_sector_ai_lookup",
+            )
+            st.session_state["analysis_selected_overview_fields_pending"] = {
+                "analysis_selected_overview_ticker_input": ticker_for_lookup,
+                "analysis_selected_overview_sector_input": ai_sector,
+            }
+            st.session_state["analysis_company_name_pending"] = selected_company_for_edit
+            st.session_state["analysis_company_hint"] = "직접입력"
+            st.session_state["analysis_selected_sector_lookup_notice"] = (
+                f"{selected_company_for_edit} 산업섹터 AI 조회 완료: {ai_sector}"
+                f" ({ai_src or 'AI'})"
+            )
+            st.rerun()
 
         if clear_selected_ticker_btn:
             cleared = clear_company_list_ticker(selected_company_for_edit, source="manual_edit_clear")
