@@ -2033,11 +2033,9 @@ def load_history(as_of_date: date | None = None) -> pd.DataFrame:
                 on="snapshot_date",
                 direction="backward",
             )
-            # 선행 구간(가장 이른 스냅샷)에도 예수금이 비어 있으면,
-            # 가장 가까운 이후 값까지 보간해 0으로 고정되는 현상을 줄인다.
-            hist_df["cash_total_krw"] = hist_df["cash_total_krw"].ffill().bfill().fillna(0.0)
-            hist_df["cash_krw"] = hist_df["cash_krw"].ffill().bfill().fillna(0.0)
-            hist_df["cash_usd"] = hist_df["cash_usd"].ffill().bfill().fillna(0.0)
+            hist_df["cash_total_krw"] = hist_df["cash_total_krw"].fillna(0.0)
+            hist_df["cash_krw"] = hist_df["cash_krw"].fillna(0.0)
+            hist_df["cash_usd"] = hist_df["cash_usd"].fillna(0.0)
             hist_df["total_value"] = hist_df["total_value"].fillna(0.0) + hist_df["cash_total_krw"]
             hist_df["total_pnl"] = hist_df["total_pnl"].fillna(0.0)
         if "cash_total_krw" in hist_df.columns:
@@ -10445,6 +10443,50 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     saved_cash_krw, saved_cash_usd = load_snapshot_cash(selected_date)
     st.caption(f"현재 저장 예수금: 원화 {saved_cash_krw:,.0f}원 / 달러 {format_usd(saved_cash_usd)}")
 
+    cash_key_suffix = selected_date.isoformat().replace("-", "")
+    cash_krw_key = f"input_cash_krw_{cash_key_suffix}"
+    cash_usd_key = f"input_cash_usd_{cash_key_suffix}"
+    if cash_krw_key not in st.session_state:
+        st.session_state[cash_krw_key] = float(saved_cash_krw)
+    if cash_usd_key not in st.session_state:
+        st.session_state[cash_usd_key] = float(saved_cash_usd)
+
+    cash_col1, cash_col2, cash_col3 = st.columns([1, 1, 1.1])
+    with cash_col1:
+        input_cash_krw = st.number_input(
+            "원화 예수금 (KRW)",
+            min_value=0.0,
+            step=10000.0,
+            format="%.0f",
+            key=cash_krw_key,
+        )
+    with cash_col2:
+        input_cash_usd = st.number_input(
+            "달러 예수금 (USD)",
+            min_value=0.0,
+            step=1.0,
+            format="%.2f",
+            key=cash_usd_key,
+        )
+    with cash_col3:
+        if st.button("예수금 저장", key=f"save_cash_only_btn_{cash_key_suffix}"):
+            save_snapshot_cash(selected_date, input_cash_krw, input_cash_usd)
+            # 예수금 저장만 변경돼도 GitHub 엑셀(스냅샷_예수금 시트) 동기화를 맞춘다.
+            sync_target_df = ensure_portfolio_columns(load_snapshot(selected_date), usd_krw_rate, force_usd_rate=True)
+            sync_ok, sync_msg = sync_snapshot_to_github_excel(selected_date, sync_target_df)
+            if sync_msg:
+                if sync_ok:
+                    st.success(
+                        f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / {sync_msg}"
+                    )
+                else:
+                    st.warning(
+                        f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / GitHub 동기화 경고: {sync_msg}"
+                    )
+            else:
+                st.success(f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)})")
+            st.rerun()
+
     if "portfolio_editor_nonce" not in st.session_state:
         st.session_state["portfolio_editor_nonce"] = 0
     editor_key = f"portfolio_editor_{int(st.session_state.get('portfolio_editor_nonce', 0))}"
@@ -10896,6 +10938,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             if final_df.empty:
                 st.warning("입력 데이터가 비어 자동 저장을 건너뜁니다. 기존 스냅샷은 유지됩니다.")
             else:
+                save_snapshot_cash(selected_date, input_cash_krw, input_cash_usd)
                 sync_ok, sync_msg = save_snapshot(
                     selected_date,
                     final_df,
@@ -10916,6 +10959,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
             if final_df.empty:
                 st.error("저장할 데이터가 없습니다. 종목 정보를 입력하세요.")
             else:
+                save_snapshot_cash(selected_date, input_cash_krw, input_cash_usd)
                 sync_ok, sync_msg = save_snapshot(selected_date, final_df, sync_to_github=True, sync_reason="manual_save")
                 st.session_state["editing_df"] = final_df
                 autosave_key = f"portfolio_autosave_hash::{selected_date.isoformat()}"
@@ -10925,11 +10969,21 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
                 st.session_state[autosave_key] = hashlib.sha256(hash_df.to_csv(index=False).encode("utf-8")).hexdigest()
                 if sync_msg:
                     if sync_ok:
-                        st.success(f"{selected_date} 스냅샷 저장 완료 / {sync_msg}")
+                        st.success(
+                            f"{selected_date} 스냅샷+예수금 저장 완료 "
+                            f"(원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / {sync_msg}"
+                        )
                     else:
-                        st.warning(f"{selected_date} 스냅샷 저장 완료 / GitHub 동기화 경고: {sync_msg}")
+                        st.warning(
+                            f"{selected_date} 스냅샷+예수금 저장 완료 "
+                            f"(원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / "
+                            f"GitHub 동기화 경고: {sync_msg}"
+                        )
                 else:
-                    st.success(f"{selected_date} 스냅샷 저장 완료")
+                    st.success(
+                        f"{selected_date} 스냅샷+예수금 저장 완료 "
+                        f"(원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)})"
+                    )
 
     with dl_col:
         csv = final_df.to_csv(index=False).encode("utf-8-sig")
