@@ -2033,9 +2033,11 @@ def load_history(as_of_date: date | None = None) -> pd.DataFrame:
                 on="snapshot_date",
                 direction="backward",
             )
-            hist_df["cash_total_krw"] = hist_df["cash_total_krw"].fillna(0.0)
-            hist_df["cash_krw"] = hist_df["cash_krw"].fillna(0.0)
-            hist_df["cash_usd"] = hist_df["cash_usd"].fillna(0.0)
+            # 선행 구간(가장 이른 스냅샷)에도 예수금이 비어 있으면,
+            # 가장 가까운 이후 값까지 보간해 0으로 고정되는 현상을 줄인다.
+            hist_df["cash_total_krw"] = hist_df["cash_total_krw"].ffill().bfill().fillna(0.0)
+            hist_df["cash_krw"] = hist_df["cash_krw"].ffill().bfill().fillna(0.0)
+            hist_df["cash_usd"] = hist_df["cash_usd"].ffill().bfill().fillna(0.0)
             hist_df["total_value"] = hist_df["total_value"].fillna(0.0) + hist_df["cash_total_krw"]
             hist_df["total_pnl"] = hist_df["total_pnl"].fillna(0.0)
         if "cash_total_krw" in hist_df.columns:
