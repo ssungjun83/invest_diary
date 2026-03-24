@@ -48,7 +48,7 @@ except Exception:
     DB_BACKUP_KEEP_COUNT = 30
 _DB_STORAGE_PREPARED = False
 DEFAULT_DATE = date.today()
-DEFAULT_EXCEL_PATH = Path("내 주식자산.xlsx")
+DEFAULT_EXCEL_PATH = APP_DIR / "내 주식자산.xlsx"
 
 COL_NAME = "종목명"
 COL_QTY = "보유수량"
@@ -10680,21 +10680,24 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         if prev_hash is None:
             st.session_state[autosave_key] = autosave_hash
         elif prev_hash != autosave_hash:
-            sync_ok, sync_msg = save_snapshot(
-                selected_date,
-                final_df,
-                sync_to_github=True,
-                sync_reason="input_auto_save",
-            )
             st.session_state["editing_df"] = final_df
             st.session_state[autosave_key] = autosave_hash
-            if sync_msg:
-                if sync_ok:
-                    st.info(f"자동 저장됨 ({selected_date}) / {sync_msg}")
-                else:
-                    st.warning(f"자동 저장됨 ({selected_date}) / GitHub 동기화 경고: {sync_msg}")
+            if final_df.empty:
+                st.warning("입력 데이터가 비어 자동 저장을 건너뜁니다. 기존 스냅샷은 유지됩니다.")
             else:
-                st.info(f"자동 저장됨 ({selected_date})")
+                sync_ok, sync_msg = save_snapshot(
+                    selected_date,
+                    final_df,
+                    sync_to_github=True,
+                    sync_reason="input_auto_save",
+                )
+                if sync_msg:
+                    if sync_ok:
+                        st.info(f"자동 저장됨 ({selected_date}) / {sync_msg}")
+                    else:
+                        st.warning(f"자동 저장됨 ({selected_date}) / GitHub 동기화 경고: {sync_msg}")
+                else:
+                    st.info(f"자동 저장됨 ({selected_date})")
 
     save_col, dl_col = st.columns([1, 1])
     with save_col:
