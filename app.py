@@ -1827,6 +1827,17 @@ def load_snapshot(snapshot_date: date) -> pd.DataFrame:
     return empty_portfolio_df()
 
 
+def load_snapshot_exact(snapshot_date: date) -> pd.DataFrame:
+    conn = get_conn()
+    try:
+        df = _query_snapshot_for_date(conn, snapshot_date)
+    finally:
+        conn.close()
+    if df is None or df.empty:
+        return empty_portfolio_df()
+    return df
+
+
 def load_latest_snapshot() -> tuple[str | None, pd.DataFrame]:
     conn = get_conn()
     try:
@@ -1953,6 +1964,24 @@ def load_snapshot_cash(snapshot_date: date) -> tuple[float, float]:
                     """,
                     (fallback_date,),
                 ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return 0.0, 0.0
+    return float(row[0] or 0.0), float(row[1] or 0.0)
+
+
+def load_snapshot_cash_exact(snapshot_date: date) -> tuple[float, float]:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT COALESCE(cash_krw, 0), COALESCE(cash_usd, 0)
+            FROM snapshot_cash
+            WHERE snapshot_date = ?
+            """,
+            (snapshot_date.isoformat(),),
+        ).fetchone()
     finally:
         conn.close()
     if not row:
@@ -10440,7 +10469,7 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     st.markdown('<div class="section-shell">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">포트폴리오 입력 및 저장</div>', unsafe_allow_html=True)
     st.caption(f"{selected_date} 기준 USD/KRW {usd_krw_rate:,.0f} 자동 적용")
-    saved_cash_krw, saved_cash_usd = load_snapshot_cash(selected_date)
+    saved_cash_krw, saved_cash_usd = load_snapshot_cash_exact(selected_date)
     st.caption(f"현재 저장 예수금: 원화 {saved_cash_krw:,.0f}원 / 달러 {format_usd(saved_cash_usd)}")
 
     cash_key_suffix = selected_date.isoformat().replace("-", "")
@@ -10471,20 +10500,29 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
     with cash_col3:
         if st.button("예수금 저장", key=f"save_cash_only_btn_{cash_key_suffix}"):
             save_snapshot_cash(selected_date, input_cash_krw, input_cash_usd)
-            # 예수금 저장만 변경돼도 GitHub 엑셀(스냅샷_예수금 시트) 동기화를 맞춘다.
-            sync_target_df = ensure_portfolio_columns(load_snapshot(selected_date), usd_krw_rate, force_usd_rate=True)
-            sync_ok, sync_msg = sync_snapshot_to_github_excel(selected_date, sync_target_df)
-            if sync_msg:
-                if sync_ok:
-                    st.success(
-                        f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / {sync_msg}"
-                    )
+            # 보유종목 스냅샷이 없는 날짜에서 예수금만 저장할 때는 원격 보유현황이 비어 덮어써지는 것을 막기 위해
+            # GitHub 즉시 동기화를 생략하고, 스냅샷 저장 시점에 함께 반영한다.
+            if has_snapshot_on_date(selected_date):
+                sync_target_df = ensure_portfolio_columns(load_snapshot_exact(selected_date), usd_krw_rate, force_usd_rate=True)
+                sync_ok, sync_msg = sync_snapshot_to_github_excel(selected_date, sync_target_df)
+                if sync_msg:
+                    if sync_ok:
+                        st.success(
+                            f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / {sync_msg}"
+                        )
+                    else:
+                        st.warning(
+                            f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / GitHub 동기화 경고: {sync_msg}"
+                        )
                 else:
-                    st.warning(
-                        f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) / GitHub 동기화 경고: {sync_msg}"
+                    st.success(
+                        f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)})"
                     )
             else:
-                st.success(f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)})")
+                st.success(
+                    f"{selected_date} 예수금 저장 완료 (원화 {input_cash_krw:,.0f}원 / 달러 {format_usd(input_cash_usd)}) "
+                    f"/ 보유종목 스냅샷이 없어 GitHub 동기화는 보류됩니다."
+                )
             st.rerun()
 
     if "portfolio_editor_nonce" not in st.session_state:
@@ -10516,8 +10554,15 @@ def render_input_tab(selected_date: date, edited_df: pd.DataFrame, usd_krw_rate:
         company_price_norm=company_price_norm,
     )
 
-    total_value, total_pnl, total_principal, total_return = compute_totals(cleaned_df, usd_krw_rate, selected_date)
-    cash_total_krw, cash_krw, cash_usd = get_snapshot_cash_krw(selected_date, None)
+    view_krw = to_krw_view(cleaned_df, usd_krw_rate)
+    stock_total_value = float(pd.to_numeric(view_krw[COL_VALUE_KRW], errors="coerce").fillna(0).sum()) if not view_krw.empty else 0.0
+    total_pnl = float(pd.to_numeric(view_krw[COL_PNL_KRW], errors="coerce").fillna(0).sum()) if not view_krw.empty else 0.0
+    cash_krw = float(input_cash_krw or 0.0)
+    cash_usd = float(input_cash_usd or 0.0)
+    cash_total_krw = cash_krw + cash_usd * float(usd_krw_rate)
+    total_value = stock_total_value + cash_total_krw
+    total_principal = total_value - total_pnl
+    total_return = (total_pnl / total_principal * 100.0) if total_principal else 0.0
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("총 평가금액", format_won(total_value))
     k2.metric("총 손익", format_signed_won(total_pnl))
@@ -15338,10 +15383,20 @@ def main() -> None:
 
         if st.button("선택 날짜 데이터 불러오기", key="sidebar_load_date_btn"):
             st.session_state["editing_df"] = ensure_portfolio_columns(
-                load_snapshot(selected_date), usd_krw_rate, force_usd_rate=True
+                load_snapshot_exact(selected_date), usd_krw_rate, force_usd_rate=True
             )
             st.session_state["editing_df_date"] = selected_date_key
             st.success(f"{selected_date} 데이터 불러오기 완료")
+
+        if st.button("선택 날짜 신규 입력 시작(초기화)", key="sidebar_start_fresh_date_btn"):
+            st.session_state["editing_df"] = ensure_portfolio_columns(
+                empty_portfolio_df(), usd_krw_rate, force_usd_rate=True
+            )
+            st.session_state["editing_df_date"] = selected_date_key
+            cash_key_suffix = selected_date.isoformat().replace("-", "")
+            st.session_state[f"input_cash_krw_{cash_key_suffix}"] = 0.0
+            st.session_state[f"input_cash_usd_{cash_key_suffix}"] = 0.0
+            st.success(f"{selected_date} 신규 입력 모드로 초기화했습니다. (보유종목/예수금)")
 
     if "portfolio_excel_notice" in st.session_state:
         st.success(st.session_state.pop("portfolio_excel_notice"))
@@ -15370,7 +15425,7 @@ def main() -> None:
     should_reload_for_date = st.session_state.get("editing_df_date", "") != selected_date_key
     if "editing_df" not in st.session_state or should_reload_for_date:
         st.session_state["editing_df"] = ensure_portfolio_columns(
-            load_snapshot(selected_date), usd_krw_rate, force_usd_rate=True
+            load_snapshot_exact(selected_date), usd_krw_rate, force_usd_rate=True
         )
         st.session_state["editing_df_date"] = selected_date_key
     else:
