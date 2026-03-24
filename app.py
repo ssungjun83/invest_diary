@@ -1559,6 +1559,215 @@ def load_portfolio_from_excel() -> pd.DataFrame:
     return _read_portfolio_excel_source(excel_path)
 
 
+def _read_snapshot_sheets_from_excel(excel_source) -> tuple[pd.DataFrame, pd.DataFrame]:
+    try:
+        xls = pd.ExcelFile(excel_source)
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+
+    snap_required = {
+        "snapshot_date",
+        "stock_name",
+        "quantity",
+        "currency",
+        "fx_rate",
+        "market_value",
+        "pnl_value",
+        "pnl_pct",
+    }
+    cash_required = {"snapshot_date", "cash_krw", "cash_usd"}
+
+    snap_df = pd.DataFrame()
+    cash_df = pd.DataFrame()
+    for sheet_name in xls.sheet_names:
+        try:
+            raw = pd.read_excel(xls, sheet_name=sheet_name)
+        except Exception:
+            continue
+        if raw is None or raw.empty:
+            continue
+        cols = {str(c).strip() for c in raw.columns}
+        if snap_df.empty and snap_required.issubset(cols):
+            snap_df = raw.copy()
+        if cash_df.empty and cash_required.issubset(cols):
+            cash_df = raw.copy()
+
+    if snap_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    snap_df = snap_df.copy()
+    snap_df["snapshot_date"] = pd.to_datetime(snap_df["snapshot_date"], errors="coerce").dt.date
+    snap_df = snap_df[snap_df["snapshot_date"].notna()].copy()
+    snap_df["snapshot_date"] = snap_df["snapshot_date"].astype(str)
+    snap_df["stock_name"] = snap_df["stock_name"].astype(str).str.strip()
+    snap_df = snap_df[snap_df["stock_name"] != ""].copy()
+    if snap_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    for col in ["quantity", "market_value", "pnl_value", "pnl_pct", "fx_rate"]:
+        snap_df[col] = pd.to_numeric(snap_df[col], errors="coerce")
+    snap_df["quantity"] = snap_df["quantity"].fillna(0.0)
+    snap_df["market_value"] = snap_df["market_value"].fillna(0.0)
+    snap_df["pnl_value"] = snap_df["pnl_value"].fillna(0.0)
+    snap_df["pnl_pct"] = snap_df["pnl_pct"].fillna(0.0)
+    snap_df["currency"] = (
+        snap_df["currency"].astype(str).str.strip().str.upper().replace({"": "KRW", "NAN": "KRW", "NONE": "KRW"})
+    )
+    snap_df["fx_rate"] = snap_df["fx_rate"].fillna(1.0)
+    snap_df.loc[snap_df["currency"] == "KRW", "fx_rate"] = 1.0
+    snap_df = snap_df[
+        ["snapshot_date", "stock_name", "quantity", "currency", "fx_rate", "market_value", "pnl_value", "pnl_pct"]
+    ].copy()
+
+    if cash_df.empty:
+        cash_df = pd.DataFrame(columns=["snapshot_date", "cash_krw", "cash_usd", "created_at", "updated_at"])
+    else:
+        cash_df = cash_df.copy()
+        cash_df["snapshot_date"] = pd.to_datetime(cash_df["snapshot_date"], errors="coerce").dt.date
+        cash_df = cash_df[cash_df["snapshot_date"].notna()].copy()
+        cash_df["snapshot_date"] = cash_df["snapshot_date"].astype(str)
+        cash_df["cash_krw"] = pd.to_numeric(cash_df["cash_krw"], errors="coerce").fillna(0.0)
+        cash_df["cash_usd"] = pd.to_numeric(cash_df["cash_usd"], errors="coerce").fillna(0.0)
+        if "created_at" not in cash_df.columns:
+            cash_df["created_at"] = ""
+        if "updated_at" not in cash_df.columns:
+            cash_df["updated_at"] = ""
+        cash_df = cash_df[["snapshot_date", "cash_krw", "cash_usd", "created_at", "updated_at"]].copy()
+
+    return snap_df, cash_df
+
+
+def restore_snapshot_db_from_excel_if_empty() -> tuple[bool, str]:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()
+        existing_cnt = int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+    if existing_cnt > 0:
+        return False, ""
+
+    sources: list[tuple[str, object]] = []
+    uploaded_bytes, uploaded_name = _get_uploaded_excel_bytes()
+    if uploaded_bytes:
+        src_name = uploaded_name or "uploaded_excel"
+        sources.append((f"업로드:{src_name}", BytesIO(uploaded_bytes)))
+    excel_path = resolve_excel_path()
+    if excel_path is not None:
+        sources.append((f"파일:{excel_path.name}", excel_path))
+
+    if not sources:
+        return False, ""
+
+    selected_source = ""
+    snap_df = pd.DataFrame()
+    cash_df = pd.DataFrame()
+    for source_name, source_obj in sources:
+        cand_snap_df, cand_cash_df = _read_snapshot_sheets_from_excel(source_obj)
+        if not cand_snap_df.empty:
+            selected_source = source_name
+            snap_df = cand_snap_df
+            cash_df = cand_cash_df
+            break
+
+    if snap_df.empty:
+        return False, ""
+
+    now_str = datetime.now().isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM snapshots")
+        conn.execute("DELETE FROM snapshot_cash")
+
+        records = [
+            (
+                str(row["snapshot_date"]),
+                str(row["stock_name"]),
+                float(row["quantity"]),
+                float(row["market_value"]),
+                float(row["pnl_value"]),
+                float(row["pnl_pct"]),
+                str(row["currency"]),
+                float(row["fx_rate"]),
+                now_str,
+            )
+            for _, row in snap_df.iterrows()
+        ]
+        conn.executemany(
+            """
+            INSERT INTO snapshots (
+                snapshot_date,
+                stock_name,
+                quantity,
+                market_value,
+                pnl_value,
+                pnl_pct,
+                currency,
+                fx_rate,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            records,
+        )
+
+        if not cash_df.empty:
+            cash_records = []
+            for _, row in cash_df.iterrows():
+                created_at = str(row.get("created_at") or "").strip() or now_str
+                updated_at = str(row.get("updated_at") or "").strip() or now_str
+                cash_records.append(
+                    (
+                        str(row["snapshot_date"]),
+                        float(row["cash_krw"]),
+                        float(row["cash_usd"]),
+                        created_at,
+                        updated_at,
+                    )
+                )
+            conn.executemany(
+                """
+                INSERT INTO snapshot_cash (snapshot_date, cash_krw, cash_usd, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date) DO UPDATE SET
+                    cash_krw=excluded.cash_krw,
+                    cash_usd=excluded.cash_usd,
+                    updated_at=excluded.updated_at
+                """,
+                cash_records,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    date_min = str(snap_df["snapshot_date"].min()) if not snap_df.empty else ""
+    date_max = str(snap_df["snapshot_date"].max()) if not snap_df.empty else ""
+    return True, (
+        f"스냅샷 DB 자동 복구 완료 ({selected_source}) / "
+        f"보유현황 {len(snap_df):,}건, 예수금 {len(cash_df):,}건, 기간 {date_min}~{date_max}"
+    )
+
+
+def get_snapshot_db_status_text() -> str:
+    conn = get_conn()
+    try:
+        snap_cnt_row = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()
+        snap_date_cnt_row = conn.execute("SELECT COUNT(DISTINCT snapshot_date) FROM snapshots").fetchone()
+        snap_range_row = conn.execute("SELECT MIN(snapshot_date), MAX(snapshot_date) FROM snapshots").fetchone()
+        cash_cnt_row = conn.execute("SELECT COUNT(*) FROM snapshot_cash").fetchone()
+    finally:
+        conn.close()
+
+    snap_cnt = int(snap_cnt_row[0] or 0) if snap_cnt_row else 0
+    snap_date_cnt = int(snap_date_cnt_row[0] or 0) if snap_date_cnt_row else 0
+    cash_cnt = int(cash_cnt_row[0] or 0) if cash_cnt_row else 0
+    min_date = str((snap_range_row[0] if snap_range_row else "") or "-")
+    max_date = str((snap_range_row[1] if snap_range_row else "") or "-")
+    return (
+        f"DB: {DB_PATH} / 스냅샷 {snap_cnt:,}행 ({snap_date_cnt:,}일, {min_date}~{max_date}) / "
+        f"예수금 {cash_cnt:,}행"
+    )
+
+
 def _query_snapshot_for_date(conn: sqlite3.Connection, snapshot_date: date | str) -> pd.DataFrame:
     date_str = snapshot_date if isinstance(snapshot_date, str) else snapshot_date.isoformat()
     query = """
@@ -14990,6 +15199,12 @@ def main() -> None:
     force_reload = bool(st.session_state.pop("force_reload_api_settings", False))
     initialize_api_settings(force=force_reload)
     bootstrap_excel_from_github_if_needed()
+    restored, restore_msg = restore_snapshot_db_from_excel_if_empty()
+    if restore_msg:
+        if restored:
+            st.session_state["snapshot_db_restore_notice_success"] = restore_msg
+        else:
+            st.session_state["snapshot_db_restore_notice_warning"] = restore_msg
     auto_ok, auto_msg = run_daily_auto_snapshot(force=False, target_date=date.today())
     if auto_msg:
         if auto_ok:
@@ -15014,6 +15229,7 @@ def main() -> None:
         st.subheader("기록 설정")
         selected_date = st.date_input("기록 날짜", value=DEFAULT_DATE)
         selected_date_key = selected_date.isoformat()
+        st.caption(get_snapshot_db_status_text())
         usd_krw_rate, fx_source = get_usd_krw_rate_for_date(selected_date)
         st.metric("해당일 USD/KRW", f"{usd_krw_rate:,.0f}")
         st.caption(f"환율 소스: {fx_source}")
@@ -15070,6 +15286,10 @@ def main() -> None:
         st.success(st.session_state.pop("daily_auto_snapshot_notice_success"))
     if "daily_auto_snapshot_notice_warning" in st.session_state:
         st.warning(st.session_state.pop("daily_auto_snapshot_notice_warning"))
+    if "snapshot_db_restore_notice_success" in st.session_state:
+        st.success(st.session_state.pop("snapshot_db_restore_notice_success"))
+    if "snapshot_db_restore_notice_warning" in st.session_state:
+        st.warning(st.session_state.pop("snapshot_db_restore_notice_warning"))
     if "github_sync_notice" in st.session_state:
         gh_notice = str(st.session_state.pop("github_sync_notice") or "").strip()
         if gh_notice:
