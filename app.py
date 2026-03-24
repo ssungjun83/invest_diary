@@ -15008,6 +15008,13 @@ def render_api_settings_tab() -> None:
     else:
         st.text_input("Claude 모델", key="global_claude_model")
 
+    # 모델 선택은 저장 버튼을 누르지 않아도 즉시 영속화해 재실행 시 기본값으로 되돌아가는 문제를 방지한다.
+    selected_claude_model = str(st.session_state.get("global_claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL).strip()
+    saved_claude_model = str(load_app_settings().get("claude_model", "") or "").strip()
+    if selected_claude_model and selected_claude_model != saved_claude_model:
+        save_app_settings_partial({"claude_model": selected_claude_model})
+        st.caption(f"Claude 모델 자동 저장: `{selected_claude_model}`")
+
     st.markdown("#### GitHub 엑셀 자동 동기화")
     st.checkbox("GitHub 동기화 사용", key="github_sync_enabled")
     st.checkbox(
