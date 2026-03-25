@@ -11914,35 +11914,37 @@ def render_company_analysis_tab(current_df: pd.DataFrame) -> None:
 
     if refresh_price_btn:
         ai_provider, ai_api_key, ai_model = get_ai_settings_from_session("analysis")
-        price_target_source = "현재 입력 보유종목"
-        holding_names = (
-            current_df[COL_NAME].dropna().astype(str).str.strip().replace({"": pd.NA}).dropna().drop_duplicates().tolist()
-            if isinstance(current_df, pd.DataFrame) and not current_df.empty and COL_NAME in current_df.columns
-            else []
-        )
-        if not holding_names:
-            latest_date_text, latest_df = load_latest_snapshot()
-            if latest_df is not None and not latest_df.empty and COL_NAME in latest_df.columns:
-                holding_names = (
-                    latest_df[COL_NAME]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .replace({"": pd.NA})
-                    .dropna()
-                    .drop_duplicates()
-                    .tolist()
-                )
-                if holding_names:
-                    price_target_source = f"최신 스냅샷({latest_date_text}) 보유종목"
+        # 현재 화면 기준(current_df)만 쓰면 같은 보유종목이라도 날짜/세션 상태에 따라 일부가 누락될 수 있어
+        # 스냅샷 전체에서 수집한 보유종목 집합(holding_set)을 우선 대상으로 사용한다.
+        price_target_source = "보유종목 전체(스냅샷 기준)"
+        holding_names = sorted({normalize_stock_name_text(v) for v in holding_set if normalize_stock_name_text(v)})
+        if not holding_names and isinstance(current_df, pd.DataFrame) and not current_df.empty and COL_NAME in current_df.columns:
+            holding_names = (
+                current_df[COL_NAME]
+                .dropna()
+                .astype(str)
+                .apply(normalize_stock_name_text)
+                .replace({"": pd.NA})
+                .dropna()
+                .drop_duplicates()
+                .tolist()
+            )
+            if holding_names:
+                price_target_source = "현재 입력 보유종목"
         targets = []
         if holding_names:
             holding_name_set = set(holding_names)
             targets = [
                 row
                 for row in overview_rows
-                if str(row.get("기업명") or "").strip() in holding_name_set
+                if normalize_stock_name_text(row.get("기업명")) in holding_name_set
             ]
+        if not targets:
+            targets = [
+                row for row in overview_rows if clean_valid_ticker(str(row.get("티커") or ""))
+            ]
+            if targets:
+                price_target_source = "티커 보유 항목 전체(폴백)"
         if not targets:
             st.info("현재 보유종목 중 주가를 갱신할 기업이 없습니다.")
         else:
