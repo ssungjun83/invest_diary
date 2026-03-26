@@ -13541,6 +13541,7 @@ def render_value_chain_tab() -> None:
         ("value_chain_warning", ""),
         ("value_chain_summary_notice", ""),
         ("value_chain_summary_warning", ""),
+        ("value_chain_selectbox_pending", ""),
     ]:
         if _k not in st.session_state:
             st.session_state[_k] = _v
@@ -13566,6 +13567,20 @@ def render_value_chain_tab() -> None:
         updated_at = str(chain_row.get("updated_at") or "").strip()
         updated_short = updated_at[:16] if updated_at else "시각없음"
         select_labels[chain_id] = f"{idx_chain}. {chain_name} ({updated_short})"
+
+    pending_select_raw = st.session_state.pop("value_chain_selectbox_pending", "")
+    pending_select = NEW_KEY
+    if pending_select_raw not in {"", None}:
+        try:
+            pending_select = int(pending_select_raw) if str(pending_select_raw) != NEW_KEY else NEW_KEY
+        except Exception:
+            pending_select = NEW_KEY
+        st.session_state["value_chain_selectbox"] = pending_select if pending_select in select_options else NEW_KEY
+    else:
+        cur_sel = st.session_state.get("value_chain_selectbox", NEW_KEY)
+        if cur_sel not in select_options:
+            st.session_state["value_chain_selectbox"] = NEW_KEY
+
     sel_col, del_col = st.columns([4, 1])
     with sel_col:
         sel_value = st.selectbox(
@@ -13579,6 +13594,7 @@ def render_value_chain_tab() -> None:
         del_btn = st.button("삭제", key="value_chain_del_btn", disabled=(sel_value == NEW_KEY))
     if del_btn and sel_value != NEW_KEY:
         delete_value_chain_from_db(int(sel_value))
+        st.session_state["value_chain_selectbox_pending"] = NEW_KEY
         st.session_state["value_chain_notice"] = f"'{select_labels.get(sel_value, '선택 체인')}' 체인을 삭제했습니다."
         st.rerun()
 
@@ -13647,8 +13663,9 @@ def render_value_chain_tab() -> None:
                 if not save_name:
                     st.warning("저장할 체인명을 입력해 주세요.")
                 else:
-                    save_value_chain_to_db(save_name, pending)
+                    new_id = save_value_chain_to_db(save_name, pending)
                     st.session_state["value_chain_pending_result"] = {}
+                    st.session_state["value_chain_selectbox_pending"] = int(new_id)
                     st.session_state["value_chain_notice"] = f"'{save_name}' 밸류체인을 저장했습니다."
                     st.rerun()
 
@@ -13840,11 +13857,12 @@ def render_value_chain_tab() -> None:
                 save_payload["chain_name"] = save_name
                 if selected_chain_id is not None:
                     update_value_chain_in_db(selected_chain_id, save_name, save_payload)
+                    st.session_state["value_chain_selectbox_pending"] = int(selected_chain_id)
                     st.session_state["value_chain_notice"] = f"'{save_name}' 밸류체인을 DB에 업데이트했습니다."
                 else:
                     new_id = save_value_chain_to_db(save_name, save_payload)
                     st.session_state["value_chain_pending_result"] = {}
-                    st.session_state["value_chain_selectbox"] = int(new_id)
+                    st.session_state["value_chain_selectbox_pending"] = int(new_id)
                     st.session_state["value_chain_notice"] = f"'{save_name}' 밸류체인을 DB에 저장했습니다."
                 st.rerun()
 
