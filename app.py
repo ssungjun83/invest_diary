@@ -4388,6 +4388,8 @@ def extract_company_watchlist_from_image_with_ai(
 def _normalize_value_chain_stage_name(value: str) -> str:
     text = str(value or "").strip()
     low = text.lower()
+    if re.search(r"\b\d+\s*tier\b", low) or re.search(r"\btier\s*\d+\b", low) or "tier" == low:
+        return "기타"
     if ("업스트림" in text) or ("upstream" in low):
         return "업스트림"
     if ("미드스트림" in text) or ("midstream" in low):
