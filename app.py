@@ -4663,24 +4663,14 @@ def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
     if df.empty:
         return None
 
-    if "sector" not in df.columns:
-        df["sector"] = ""
-    df["sector"] = (
-        df["sector"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .replace({"": "미분류"})
-    )
-
     stage_order = ["업스트림", "미드스트림", "다운스트림"]
     stage_rank_map = {name: idx for idx, name in enumerate(stage_order)}
     df["stage_rank"] = df["stage"].map(stage_rank_map).fillna(99).astype(int)
-    df = df.sort_values(["sector", "stage_rank", "segment", "input_company"], kind="stable").copy()
+    df = df.sort_values(["stage_rank", "segment", "input_company"], kind="stable").copy()
 
     nodes: list[str] = []
     node_index: dict[str, int] = {}
-    sector_nodes: set[str] = set()
+    root_name = str(chain_name or "밸류체인").strip() or "밸류체인"
 
     def _idx(name: str) -> int:
         if name not in node_index:
@@ -4695,47 +4685,43 @@ def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
 
     stage_color = {"업스트림": "#2563eb", "미드스트림": "#0f766e", "다운스트림": "#ea580c", "기타": "#64748b"}
 
-    # 최상위: 산업섹터 → 단계
-    sector_stage_counts = (
-        df.groupby(["sector", "stage_rank", "stage"], dropna=False, sort=False)
+    # 최상위: 밸류체인명(대표 1개) → 단계
+    stage_counts = (
+        df.groupby(["stage_rank", "stage"], dropna=False, sort=False)
         .size()
         .reset_index(name="cnt")
-        .sort_values(["sector", "stage_rank"], kind="stable")
+        .sort_values(["stage_rank"], kind="stable")
     )
-    for _, r in sector_stage_counts.iterrows():
-        sector_name = str(r["sector"] or "미분류")
+    for _, r in stage_counts.iterrows():
         stage_name = str(r["stage"])
-        sector_nodes.add(sector_name)
-        links_source.append(_idx(sector_name))
+        links_source.append(_idx(root_name))
         links_target.append(_idx(stage_name))
         links_value.append(float(r["cnt"]))
         links_color.append("rgba(148,163,184,0.35)")
 
     stage_seg_counts = (
-        df.groupby(["sector", "stage_rank", "stage", "segment"], dropna=False, sort=False)
+        df.groupby(["stage_rank", "stage", "segment"], dropna=False, sort=False)
         .size()
         .reset_index(name="cnt")
-        .sort_values(["sector", "stage_rank", "segment"], kind="stable")
+        .sort_values(["stage_rank", "segment"], kind="stable")
     )
     for _, r in stage_seg_counts.iterrows():
         s = str(r["stage"])
-        sector_name = str(r["sector"] or "미분류")
-        seg = f"{sector_name} | {s} | {str(r['segment'])}"
+        seg = f"{s} | {str(r['segment'])}"
         links_source.append(_idx(s))
         links_target.append(_idx(seg))
         links_value.append(float(r["cnt"]))
         links_color.append("rgba(148,163,184,0.35)")
 
     seg_company_counts = (
-        df.groupby(["sector", "stage_rank", "stage", "segment", "input_company", "matched"], dropna=False, sort=False)
+        df.groupby(["stage_rank", "stage", "segment", "input_company", "matched"], dropna=False, sort=False)
         .size()
         .reset_index(name="cnt")
-        .sort_values(["sector", "stage_rank", "segment", "input_company"], kind="stable")
+        .sort_values(["stage_rank", "segment", "input_company"], kind="stable")
     )
     for _, r in seg_company_counts.iterrows():
         s = str(r["stage"])
-        sector_name = str(r["sector"] or "미분류")
-        seg = f"{sector_name} | {s} | {str(r['segment'])}"
+        seg = f"{s} | {str(r['segment'])}"
         cname = str(r["input_company"])
         label = f"{cname} {'(매칭)' if bool(r['matched']) else '(미매칭)'}"
         links_source.append(_idx(seg))
@@ -4745,7 +4731,7 @@ def _build_value_chain_sankey_figure(match_rows: list[dict], chain_name: str):
 
     node_colors = []
     for n in nodes:
-        if n in sector_nodes:
+        if n == root_name:
             node_colors.append("#334155")
         elif n in stage_color:
             node_colors.append(stage_color.get(n, "#64748b"))
@@ -13801,16 +13787,9 @@ def render_value_chain_tab() -> None:
     stage_order_list = ["업스트림", "미드스트림", "다운스트림"]
     if "sector" not in df.columns:
         df["sector"] = ""
-    df["sector"] = (
-        df["sector"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .replace({"": "미분류"})
-    )
+    df["sector"] = df["sector"].fillna("").astype(str).str.strip()
     df["stage_order"] = df["stage"].apply(lambda x: stage_order_list.index(x) if x in stage_order_list else 99)
-    df["sector_order"] = (df["sector"] == "미분류").astype(int)
-    df = df.sort_values(["sector_order", "sector", "stage_order", "segment", "input_company"], kind="stable").copy()
+    df = df.sort_values(["stage_order", "segment", "input_company"], kind="stable").copy()
 
     view_tab, kw_tab = st.tabs(["전체 보기", "키워드 탐색"])
 
@@ -13833,36 +13812,33 @@ def render_value_chain_tab() -> None:
                 latest_analysis_map[nm] = arow.to_dict()
 
         popover_seq = 0
-        for sector_name in list(dict.fromkeys(view_df["sector"].tolist())):
-            sector_df = view_df[view_df["sector"] == sector_name].copy()
-            if sector_df.empty:
+        for stage_name in list(dict.fromkeys(view_df["stage"].tolist())):
+            stage_df = view_df[view_df["stage"] == stage_name].copy()
+            if stage_df.empty:
                 continue
-            st.markdown(f"### 산업섹터: {sector_name}")
-            for stage_name in list(dict.fromkeys(sector_df["stage"].tolist())):
-                stage_df = sector_df[sector_df["stage"] == stage_name].copy()
-                if stage_df.empty:
-                    continue
-                st.markdown(f"#### {stage_name}")
-                segments = stage_df["segment"].dropna().astype(str).unique().tolist()
-                seg_cols = st.columns(max(1, min(4, len(segments))))
-                for idx_s, seg in enumerate(segments):
-                    seg_df = stage_df[stage_df["segment"] == seg].copy()
-                    with seg_cols[idx_s % len(seg_cols)]:
-                        st.markdown(f"**{seg}**")
-                        for _, rr in seg_df.iterrows():
-                            popover_seq += 1
-                            in_name = str(rr.get("input_company") or "").strip()
-                            m_name = str(rr.get("matched_company") or "").strip()
-                            matched = bool(rr.get("matched"))
-                            head_text = f"매칭 | {in_name} → {m_name}" if matched else f"미매칭 | {in_name}"
-                            st.caption(head_text)
-                            with st.popover(f"{in_name or '기업'} ({popover_seq})"):
-                                _render_value_chain_company_detail(
-                                    input_company=in_name,
-                                    matched_company=m_name,
-                                    company_list_df=company_list_df,
-                                    latest_analysis_map=latest_analysis_map,
-                                )
+            stage_text = str(stage_name or "").strip()
+            if stage_text in stage_order_list:
+                st.markdown(f"#### {stage_text}")
+            segments = stage_df["segment"].dropna().astype(str).unique().tolist()
+            seg_cols = st.columns(max(1, min(4, len(segments))))
+            for idx_s, seg in enumerate(segments):
+                seg_df = stage_df[stage_df["segment"] == seg].copy()
+                with seg_cols[idx_s % len(seg_cols)]:
+                    st.markdown(f"**{seg}**")
+                    for _, rr in seg_df.iterrows():
+                        popover_seq += 1
+                        in_name = str(rr.get("input_company") or "").strip()
+                        m_name = str(rr.get("matched_company") or "").strip()
+                        matched = bool(rr.get("matched"))
+                        head_text = f"매칭 | {in_name} → {m_name}" if matched else f"미매칭 | {in_name}"
+                        st.caption(head_text)
+                        with st.popover(f"{in_name or '기업'} ({popover_seq})"):
+                            _render_value_chain_company_detail(
+                                input_company=in_name,
+                                matched_company=m_name,
+                                company_list_df=company_list_df,
+                                latest_analysis_map=latest_analysis_map,
+                            )
 
         sankey_fig = _build_value_chain_sankey_figure(view_df.to_dict("records"), chain_name)
         if sankey_fig is not None:
@@ -13880,16 +13856,16 @@ def render_value_chain_tab() -> None:
                 "sector": "산업섹터",
             }
         )
+        out_df["밸류체인명"] = chain_name
         out_df["매칭점수"] = pd.to_numeric(out_df["매칭점수"], errors="coerce").round(3)
         out_df["stage_order"] = out_df["단계"].apply(lambda x: stage_order_list.index(x) if x in stage_order_list else 99)
-        out_df["sector_order"] = (out_df["산업섹터"] == "미분류").astype(int)
         out_df = out_df.sort_values(
-            ["sector_order", "산업섹터", "stage_order", "세부공정", "이미지기업명"],
+            ["stage_order", "세부공정", "이미지기업명"],
             kind="stable",
         )
         st.markdown("#### 매칭 상세")
         st.dataframe(
-            out_df[["산업섹터", "단계", "세부공정", "이미지기업명", "매칭기업명", "티커", "매칭여부", "매칭점수"]],
+            out_df[["밸류체인명", "세부공정", "이미지기업명", "매칭기업명", "티커", "산업섹터", "매칭여부", "매칭점수"]],
             height=estimate_dataframe_height(out_df, min_height=240, max_height=1200),
             use_container_width=True,
             hide_index=True,
