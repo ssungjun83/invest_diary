@@ -13700,11 +13700,29 @@ def render_value_chain_tab() -> None:
     matched_count = int(df["matched"].sum()) if "matched" in df.columns else 0
     unmatched_count = max(0, total_count - matched_count)
     stage_count = len(df["stage"].dropna().unique())
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("체인명", chain_name)
-    m2.metric("체인 기업수", f"{total_count:,}")
-    m3.metric("관심기업 매칭", f"{matched_count:,}")
-    m4.metric("미매칭", f"{unmatched_count:,}")
+    sector_series = (
+        df.get("sector", pd.Series(dtype="object"))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace({"": pd.NA})
+        .dropna()
+    )
+    sector_counts = sector_series.value_counts() if not sector_series.empty else pd.Series(dtype="int64")
+    top_sector = str(sector_counts.index[0]) if not sector_counts.empty else "미분류"
+    top_sector_count = int(sector_counts.iloc[0]) if not sector_counts.empty else 0
+    sector_summary_parts = [
+        f"{str(sec)} {int(cnt):,}개"
+        for sec, cnt in sector_counts.head(5).items()
+    ]
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("대표 산업섹터", top_sector, delta=f"{top_sector_count:,}개" if top_sector_count > 0 else None)
+    m2.metric("체인명", chain_name)
+    m3.metric("체인 기업수", f"{total_count:,}")
+    m4.metric("관심기업 매칭", f"{matched_count:,}")
+    m5.metric("미매칭", f"{unmatched_count:,}")
+    if sector_summary_parts:
+        st.caption("산업섹터 분포: " + " / ".join(sector_summary_parts))
     st.caption(f"단계 수: {stage_count} / 생성시각: {str(result.get('created_at') or '-')}")
     src_img_bytes, src_img_mime, src_img_name = _extract_value_chain_source_image(result)
     if src_img_bytes:
